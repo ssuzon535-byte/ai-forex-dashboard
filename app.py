@@ -11,6 +11,33 @@ st.set_page_config(
     layout="wide",
 )
 
+
+def safe_accuracy_pct(wins, total):
+    """Return win rate as a percentage, never a 0-1 ratio."""
+    try:
+        wins = int(wins)
+        total = int(total)
+        return (wins / total * 100.0) if total > 0 else 0.0
+    except Exception:
+        return 0.0
+
+def trade_result_from_path(entry, sl, tp, highs, lows, direction):
+    """Determine which target/stop was hit first from OHLC paths."""
+    direction = str(direction).upper()
+    for hi, lo in zip(highs, lows):
+        if direction == "BUY":
+            if lo <= sl:
+                return "LOSS"
+            if hi >= tp:
+                return "WIN"
+        elif direction == "SELL":
+            if hi >= sl:
+                return "LOSS"
+            if lo <= tp:
+                return "WIN"
+    return "OPEN"
+
+
 SYMBOLS = {
     "Gold (XAU/USD)": "XAU/USD",
     "Silver (XAG/USD)": "XAG/USD",
@@ -463,18 +490,12 @@ def get_signal(row, df, min_score=6):
     sell_score = int(sum(sell_checks))
     max_score = len(buy_checks)
 
-    # Quality gate: an actionable signal must have the full EMA20/50/200
-    # structure aligned with the direction. This prevents a 7/9 score from
-    # becoming a trade when the core trend structure is actually against it.
-    buy_trend_ok = bool(row["EMA20"] > row["EMA50"] > row["EMA200"])
-    sell_trend_ok = bool(row["EMA20"] < row["EMA50"] < row["EMA200"])
-
     # WAIT is preferred in a choppy market unless the technical setup is unusually strong.
     if regime == "CHOPPY / RANGE" and max(buy_score, sell_score) < 8:
         signal = "WAIT"
-    elif buy_score >= min_score and buy_score > sell_score and buy_trend_ok:
+    elif buy_score >= min_score and buy_score > sell_score:
         signal = "STRONG BUY" if buy_score >= 8 else "BUY"
-    elif sell_score >= min_score and sell_score > buy_score and sell_trend_ok:
+    elif sell_score >= min_score and sell_score > buy_score:
         signal = "STRONG SELL" if sell_score >= 8 else "SELL"
     else:
         signal = "WAIT"
@@ -898,7 +919,7 @@ if final_signal in ["BUY", "STRONG BUY", "SELL", "STRONG SELL"] and trade:
         )
         st.write(
             f"**Risk distance:** `{trade['risk_distance']:.5f}`  |  "
-            f"**Risk budget:** `${risk_amount:.2f}` ({risk_pct:.1f}% of ${account_balance:,.2f})"
+            f"**Risk budget:** `${risk_amount:.2f}`"
         )
 
     if mtf_enabled:
@@ -906,8 +927,6 @@ if final_signal in ["BUY", "STRONG BUY", "SELL", "STRONG SELL"] and trade:
             f"**MTF:** `{mtf_status}`  |  **MTF direction:** `{mtf_dir}`"
         )
 else:
-    if signal_info["score"] >= min_score:
-        st.info("ℹ️ Technical score is high, but the EMA20/50/200 trend gate or MTF filter is not aligned. Signal kept at WAIT for accuracy.")
     st.warning(
         f"🟡 WAIT — setup is not strong enough. "
         f"Technical: {signal_info['score']}/{signal_info['max_score']} | "
@@ -931,7 +950,7 @@ with left:
             (raw_direction == "BUY" and signal_row["EMA20"] > signal_row["EMA50"] > signal_row["EMA200"])
             or
             (raw_direction == "SELL" and signal_row["EMA20"] < signal_row["EMA50"] < signal_row["EMA200"])
-        ) else "NO — trend gate",
+        ) else "NO",
         "RSI": f"{signal_row['RSI']:.1f}",
         "ADX": f"{signal_row['ADX']:.1f}",
         "MACD": "Bullish" if signal_row["MACD"] > signal_row["MACD_signal"] else "Bearish",
@@ -1078,4 +1097,89 @@ st.divider()
 st.caption(
     "Data source: Twelve Data API. The dashboard uses technical rules and historical "
     "simulation; it does not predict the market with certainty and does not execute trades."
-                             )
+)
+
+
+# ================= FINAL TRADE ANALYSIS =================
+st.markdown("---")
+st.subheader("📊 Final Trade Analysis")
+
+try:
+    _bt = bt_trades.copy() if "bt_trades" in locals() and hasattr(bt_trades, "copy") else pd.DataFrame()
+except Exception:
+    _bt = pd.DataFrame()
+
+if _bt.empty:
+    st.info("No completed trades yet. WAIT signals are not counted as trades.")
+else:
+    # Normalize common column names from the existing backtest.
+    _bt.columns = [str(c) for c in _bt.columns]
+    result_col = next((c for c in ["Result", "result", "Outcome", "outcome", "Status", "status"] if c in _bt.columns), None)
+    dir_col = next((c for c in ["Direction", "direction", "Side", "side", "Signal", "signal"] if c in _bt.columns), None)
+    r_col = next((c for c in ["R", "r", "R_Multiple", "R Multiple", "Net R"] if c in _bt.columns), None)
+
+    if result_col:
+        _res = _bt[result_col].astype(str).str.upper()
+        _wins = int(_res.isin(["WIN", "WON", "TP", "PROFIT"]).sum())
+        _losses = int(_res.isin(["LOSS", "LOST", "SL"]).sum())
+        _closed = _wins + _losses
+    else:
+        _wins = _losses = 0
+        _closed = len(_bt)
+
+    _win_rate = safe_accuracy_pct(_wins, _closed)
+    _total = len(_bt)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total Trades", _total)
+    c2.metric("Wins", _wins)
+    c3.metric("Losses", _losses)
+    c4.metric("Win Rate", f"{_win_rate:.1f}%")
+
+    if _total < 20:
+        st.warning(f"⚠️ Only {_total} completed trade(s). Accuracy is not statistically reliable yet. Aim for at least 20–30 trades.")
+
+    # Direction breakdown
+    if dir_col:
+        _d = _bt[dir_col].astype(str).str.upper()
+        _rows = []
+        for _side in ["BUY", "SELL"]:
+            _mask = _d.eq(_side)
+            _side_df = _bt[_mask]
+            _side_n = len(_side_df)
+            if result_col:
+                _sr = _side_df[result_col].astype(str).str.upper()
+                _sw = int(_sr.isin(["WIN", "WON", "TP", "PROFIT"]).sum())
+                _sl = int(_sr.isin(["LOSS", "LOST", "SL"]).sum())
+            else:
+                _sw = _sl = 0
+            _acc = safe_accuracy_pct(_sw, _sw + _sl)
+            _rows.append({"Direction": _side, "Trades": _side_n, "Wins": _sw, "Losses": _sl, "Accuracy": f"{_acc:.1f}%"})
+        st.markdown("**BUY / SELL Performance**")
+        st.dataframe(pd.DataFrame(_rows), use_container_width=True, hide_index=True)
+
+    # Full final trade table
+    st.markdown("**Completed Trade History**")
+    st.dataframe(_bt.tail(50), use_container_width=True, hide_index=True)
+
+
+# ================= STALE DATA WARNING =================
+try:
+    _latest_candidates = []
+    for _name in ["df", "data", "candles", "df_main"]:
+        if _name in locals():
+            _obj = locals()[_name]
+            if hasattr(_obj, "index") and len(_obj.index):
+                _latest_candidates.append(_obj.index[-1])
+    if _latest_candidates:
+        _latest = pd.to_datetime(_latest_candidates[-1], errors="coerce")
+        if pd.notna(_latest):
+            if getattr(_latest, "tzinfo", None) is None:
+                _now = pd.Timestamp.now()
+            else:
+                _now = pd.Timestamp.now(tz=_latest.tz)
+            _age_hours = (_now - _latest).total_seconds() / 3600
+            if _age_hours > 72:
+                st.error(f"⚠️ STALE DATA WARNING: latest candle is about {_age_hours:.1f} hours old ({_latest}). Do not trade from this data.")
+except Exception:
+    pass
