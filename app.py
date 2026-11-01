@@ -463,12 +463,18 @@ def get_signal(row, df, min_score=6):
     sell_score = int(sum(sell_checks))
     max_score = len(buy_checks)
 
+    # Quality gate: an actionable signal must have the full EMA20/50/200
+    # structure aligned with the direction. This prevents a 7/9 score from
+    # becoming a trade when the core trend structure is actually against it.
+    buy_trend_ok = bool(row["EMA20"] > row["EMA50"] > row["EMA200"])
+    sell_trend_ok = bool(row["EMA20"] < row["EMA50"] < row["EMA200"])
+
     # WAIT is preferred in a choppy market unless the technical setup is unusually strong.
     if regime == "CHOPPY / RANGE" and max(buy_score, sell_score) < 8:
         signal = "WAIT"
-    elif buy_score >= min_score and buy_score > sell_score:
+    elif buy_score >= min_score and buy_score > sell_score and buy_trend_ok:
         signal = "STRONG BUY" if buy_score >= 8 else "BUY"
-    elif sell_score >= min_score and sell_score > buy_score:
+    elif sell_score >= min_score and sell_score > buy_score and sell_trend_ok:
         signal = "STRONG SELL" if sell_score >= 8 else "SELL"
     else:
         signal = "WAIT"
@@ -843,29 +849,65 @@ st.caption(
 # -----------------------------
 # Final setup card
 # -----------------------------
+def format_price(value, symbol_name):
+    # Keep enough decimals so Entry/SL/TP never look identical because of rounding.
+    if "XAU" in symbol_name or "XAG" in symbol_name:
+        return f"{float(value):.2f}"
+    if "JPY" in symbol_name:
+        return f"{float(value):.3f}"
+    return f"{float(value):.5f}"
+
+
+def validate_trade_levels(trade_obj):
+    if not trade_obj:
+        return False
+    e = float(trade_obj["entry"])
+    sl = float(trade_obj["sl"])
+    tp1 = float(trade_obj["tp1"])
+    tp2 = float(trade_obj["tp2"])
+    if trade_obj["direction"] == "BUY":
+        return sl < e < tp1 <= tp2
+    return tp2 <= tp1 < e < sl
+
+
 st.subheader("🎯 Final Trade Analysis")
 
 if final_signal in ["BUY", "STRONG BUY", "SELL", "STRONG SELL"] and trade:
-    risk_amount = account_balance * risk_pct / 100.0
+    # Hard safety check: Entry, SL and TP must be on the correct sides of Entry.
+    if not validate_trade_levels(trade):
+        st.error("⚠️ Entry/SL/TP calculation invalid — trade levels hidden to prevent a wrong setup.")
+        trade = None
+    else:
+        risk_amount = account_balance * risk_pct / 100.0
+        entry_txt = format_price(trade["entry"], symbol)
+        sl_txt = format_price(trade["sl"], symbol)
+        tp1_txt = format_price(trade["tp1"], symbol)
+        tp2_txt = format_price(trade["tp2"], symbol)
+        tp3_txt = format_price(trade["tp3"], symbol)
 
-    a, b, c, d, e = st.columns(5)
-    a.metric("Direction", trade["direction"])
-    b.metric("Entry", f"{trade['entry']:.5f}")
-    c.metric("SL", f"{trade['sl']:.5f}")
-    d.metric("TP1", f"{trade['tp1']:.5f}")
-    e.metric("TP2", f"{trade['tp2']:.5f}")
+        a, b, c, d, e = st.columns(5)
+        a.metric("Direction", trade["direction"])
+        b.metric("Entry", entry_txt)
+        c.metric("SL", sl_txt)
+        d.metric("TP1", tp1_txt)
+        e.metric("TP2", tp2_txt)
 
-    st.write(
-        f"**TP3:** `{trade['tp3']:.5f}`  |  "
-        f"**Risk distance:** `{trade['risk_distance']:.5f}`  |  "
-        f"**Risk budget:** `${risk_amount:.2f}`"
-    )
+        st.write(
+            f"**Entry:** `{entry_txt}`  |  **SL:** `{sl_txt}`  |  "
+            f"**TP1:** `{tp1_txt}`  |  **TP2:** `{tp2_txt}`  |  **TP3:** `{tp3_txt}`"
+        )
+        st.write(
+            f"**Risk distance:** `{trade['risk_distance']:.5f}`  |  "
+            f"**Risk budget:** `${risk_amount:.2f}` ({risk_pct:.1f}% of ${account_balance:,.2f})"
+        )
 
     if mtf_enabled:
         st.write(
             f"**MTF:** `{mtf_status}`  |  **MTF direction:** `{mtf_dir}`"
         )
 else:
+    if signal_info["score"] >= min_score:
+        st.info("ℹ️ Technical score is high, but the EMA20/50/200 trend gate or MTF filter is not aligned. Signal kept at WAIT for accuracy.")
     st.warning(
         f"🟡 WAIT — setup is not strong enough. "
         f"Technical: {signal_info['score']}/{signal_info['max_score']} | "
@@ -889,7 +931,7 @@ with left:
             (raw_direction == "BUY" and signal_row["EMA20"] > signal_row["EMA50"] > signal_row["EMA200"])
             or
             (raw_direction == "SELL" and signal_row["EMA20"] < signal_row["EMA50"] < signal_row["EMA200"])
-        ) else "NO",
+        ) else "NO — trend gate",
         "RSI": f"{signal_row['RSI']:.1f}",
         "ADX": f"{signal_row['ADX']:.1f}",
         "MACD": "Bullish" if signal_row["MACD"] > signal_row["MACD_signal"] else "Bearish",
@@ -1036,4 +1078,4 @@ st.divider()
 st.caption(
     "Data source: Twelve Data API. The dashboard uses technical rules and historical "
     "simulation; it does not predict the market with certainty and does not execute trades."
-        )
+                             )
