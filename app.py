@@ -1,796 +1,1149 @@
-
 import streamlit as st
 import requests
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from datetime import datetime, timezone
 
+# =========================================================
+# PAGE
+# =========================================================
 st.set_page_config(
-    page_title="AI Forex Market Analysis",
+    page_title="AI Forex Market Analysis V2",
     page_icon="📊",
     layout="wide"
 )
 
-st.title("📊 AI Forex Market Analysis Dashboard")
-st.caption("XAUUSD & Major Forex Pairs | Technical Analysis")
+st.title("📊 AI Forex Market Analysis V2")
+st.caption(
+    "Live Forex/XAUUSD technical analysis • MTF • Market Regime • "
+    "Accuracy Backtest • Smart SL/TP"
+)
 
-try:
-    API_KEY = st.secrets["TWELVE_DATA_API_KEY"]
-except Exception:
-    API_KEY = ""
+# =========================================================
+# SETTINGS
+# =========================================================
+SYMBOLS = {
+    "Gold (XAU/USD)": "XAU/USD",
+    "Silver (XAG/USD)": "XAG/USD",
+    "EUR/USD": "EUR/USD",
+    "GBP/USD": "GBP/USD",
+    "USD/JPY": "USD/JPY",
+    "USD/CHF": "USD/CHF",
+    "AUD/USD": "AUD/USD",
+    "NZD/USD": "NZD/USD",
+    "USD/CAD": "USD/CAD",
+    "EUR/GBP": "EUR/GBP",
+    "EUR/JPY": "EUR/JPY",
+    "GBP/JPY": "GBP/JPY",
+    "AUD/JPY": "AUD/JPY",
+    "CAD/JPY": "CAD/JPY",
+    "CHF/JPY": "CHF/JPY",
+    "USD/BDT": "USD/BDT"
+}
 
-SYMBOLS = [
-    "XAU/USD", "EUR/USD", "GBP/USD", "USD/JPY",
-    "USD/CHF", "AUD/USD", "NZD/USD", "USD/CAD",
-    "EUR/JPY", "GBP/JPY", "EUR/GBP", "AUD/JPY"
-]
-
-TIMEFRAMES = {
+INTERVALS = {
     "1H": "1h",
     "15M": "15min",
     "10M": "10min",
     "5M": "5min"
 }
 
+MTF_INTERVALS = ["1h", "15min", "10min", "5min"]
 
-@st.cache_data(ttl=60)
-def get_data(symbol, interval, api_key):
-    url = "https://api.twelvedata.com/time_series"
 
-    params = {
-        "symbol": symbol,
-        "interval": interval,
-        "outputsize": 500,
-        "apikey": api_key,
-        "timezone": "UTC"
-    }
+# =========================================================
+# SIDEBAR
+# =========================================================
+with st.sidebar:
 
-    response = requests.get(url, params=params, timeout=20)
-    response.raise_for_status()
+    st.header("⚙️ Market Settings")
 
-    result = response.json()
-
-    if "values" not in result:
-        raise ValueError(
-            result.get("message", "No market data returned")
-        )
-
-    df = pd.DataFrame(result["values"])
-
-    df["datetime"] = pd.to_datetime(
-        df["datetime"], utc=True
+    market_name = st.selectbox(
+        "Market",
+        list(SYMBOLS.keys()),
+        index=0
     )
 
-    for col in ["open", "high", "low", "close"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+    symbol = SYMBOLS[market_name]
 
-    df = df.dropna()
-    df = df.sort_values("datetime").reset_index(drop=True)
+    timeframe_name = st.selectbox(
+        "Main Timeframe",
+        list(INTERVALS.keys()),
+        index=1
+    )
+
+    interval = INTERVALS[timeframe_name]
+
+    candles = st.select_slider(
+        "Historical candles",
+        options=[150, 200, 300, 400, 500],
+        value=300
+    )
+
+    signal_mode = st.radio(
+        "Signal Mode",
+        [
+            "Closed Candle - Stable",
+            "Live Candle - Faster"
+        ],
+        index=0
+    )
+
+    st.divider()
+
+    st.header("🎯 Signal Settings")
+
+    min_score = st.slider(
+        "Minimum Score",
+        5,
+        9,
+        6
+    )
+
+    use_mtf = st.checkbox(
+        "Enable MTF Confirmation",
+        value=True
+    )
+
+    strict_mtf = st.checkbox(
+        "Strict MTF Filter",
+        value=True
+    )
+
+    st.divider()
+
+    st.header("💰 Risk Management")
+
+    balance = st.number_input(
+        "Account Balance ($)",
+        min_value=0.0,
+        value=1000.0,
+        step=100.0
+    )
+
+    risk_percent = st.number_input(
+        "Risk per Trade (%)",
+        min_value=0.1,
+        max_value=5.0,
+        value=1.0,
+        step=0.1
+    )
+
+    rr1 = st.number_input(
+        "TP1 RR",
+        min_value=0.5,
+        max_value=10.0,
+        value=1.0,
+        step=0.5
+    )
+
+    rr2 = st.number_input(
+        "TP2 RR",
+        min_value=0.5,
+        max_value=10.0,
+        value=2.0,
+        step=0.5
+    )
+
+    rr3 = st.number_input(
+        "TP3 RR",
+        min_value=0.5,
+        max_value=10.0,
+        value=3.0,
+        step=0.5
+    )
+
+    st.divider()
+
+    if st.button(
+        "🔄 Refresh Market",
+        use_container_width=True
+    ):
+        st.cache_data.clear()
+        st.rerun()
+
+
+# =========================================================
+# API KEY
+# =========================================================
+api_key = st.secrets.get(
+    "TWELVE_DATA_API_KEY",
+    ""
+)
+
+if not api_key:
+    st.error(
+        "❌ TWELVE_DATA_API_KEY পাওয়া যায়নি। "
+        "Streamlit Secrets-এ API key যোগ করো।"
+    )
+    st.stop()
+
+
+# =========================================================
+# API TEST
+# =========================================================
+def test_api(key):
+
+    url = "https://api.twelvedata.com/time_series"
+
+    response = requests.get(
+        url,
+        params={
+            "symbol": "XAU/USD",
+            "interval": "15min",
+            "outputsize": 2,
+            "apikey": key,
+            "format": "JSON"
+        },
+        timeout=15
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    if data.get("status") == "error":
+        raise ValueError(
+            data.get(
+                "message",
+                "Unknown Twelve Data error"
+            )
+        )
+
+    values = data.get("values")
+
+    if not values:
+        raise ValueError(
+            "API connected but candle data পাওয়া যায়নি।"
+        )
+
+    last = values[0]
+
+    return {
+        "symbol": data.get(
+            "meta",
+            {}
+        ).get(
+            "symbol",
+            "XAU/USD"
+        ),
+        "interval": data.get(
+            "meta",
+            {}
+        ).get(
+            "interval",
+            "15min"
+        ),
+        "candles": len(values),
+        "time": last.get("datetime"),
+        "close": float(last["close"])
+    }
+
+
+with st.sidebar:
+
+    st.header("🔌 API Connection")
+
+    if st.button(
+        "🧪 Test Twelve Data API",
+        use_container_width=True
+    ):
+
+        with st.spinner(
+            "Testing Twelve Data..."
+        ):
+
+            try:
+
+                result = test_api(api_key)
+
+                st.success(
+                    "✅ API Connected"
+                )
+
+                st.metric(
+                    "XAU/USD",
+                    f"{result['close']:,.3f}"
+                )
+
+                st.caption(
+                    f"Candles: {result['candles']}"
+                )
+
+                st.caption(
+                    f"Last candle: {result['time']}"
+                )
+
+            except requests.exceptions.Timeout:
+
+                st.error(
+                    "❌ API Timeout"
+                )
+
+            except requests.exceptions.RequestException as e:
+
+                st.error(
+                    f"❌ Network error: {e}"
+                )
+
+            except Exception as e:
+
+                st.error(
+                    f"❌ API Test Failed: {e}"
+                )
+
+
+# =========================================================
+# DATA FETCH
+# =========================================================
+@st.cache_data(ttl=45)
+def get_data(
+    key,
+    sym,
+    tf,
+    size
+):
+
+    url = "https://api.twelvedata.com/time_series"
+
+    response = requests.get(
+        url,
+        params={
+            "symbol": sym,
+            "interval": tf,
+            "outputsize": size,
+            "apikey": key,
+            "format": "JSON"
+        },
+        timeout=20
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    if data.get("status") == "error":
+
+        raise ValueError(
+            data.get(
+                "message",
+                "API error"
+            )
+        )
+
+    if "values" not in data:
+
+        raise ValueError(
+            "No candle values returned."
+        )
+
+    df = pd.DataFrame(
+        data["values"]
+    )
+
+    required = [
+        "datetime",
+        "open",
+        "high",
+        "low",
+        "close"
+    ]
+
+    for column in required:
+
+        if column not in df.columns:
+
+            raise ValueError(
+                f"Missing column: {column}"
+            )
+
+    for column in [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume"
+    ]:
+
+        if column in df.columns:
+
+            df[column] = pd.to_numeric(
+                df[column],
+                errors="coerce"
+            )
+
+    df["datetime"] = pd.to_datetime(
+        df["datetime"],
+        errors="coerce"
+    )
+
+    df = df.dropna(
+        subset=required
+    )
+
+    df = df.drop_duplicates(
+        "datetime"
+    )
+
+    df = df.sort_values(
+        "datetime"
+    ).reset_index(
+        drop=True
+    )
+
+    if len(df) < 80:
+
+        raise ValueError(
+            "Not enough candles."
+        )
 
     return df
 
 
+# =========================================================
+# INDICATORS
+# =========================================================
 def indicators(df):
+
     d = df.copy()
 
-    close = d["close"]
+    # EMA
+    d["EMA20"] = d["close"].ewm(
+        span=20,
+        adjust=False
+    ).mean()
 
-    d["EMA20"] = close.ewm(span=20).mean()
-    d["EMA50"] = close.ewm(span=50).mean()
-    d["EMA200"] = close.ewm(span=200).mean()
+    d["EMA50"] = d["close"].ewm(
+        span=50,
+        adjust=False
+    ).mean()
 
-    delta = close.diff()
+    d["EMA200"] = d["close"].ewm(
+        span=200,
+        adjust=False
+    ).mean()
 
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
+    # RSI
+    change = d["close"].diff()
+
+    gain = change.clip(
+        lower=0
+    )
+
+    loss = -change.clip(
+        upper=0
+    )
 
     avg_gain = gain.ewm(
-        alpha=1/14, adjust=False
+        alpha=1 / 14,
+        min_periods=14,
+        adjust=False
     ).mean()
 
     avg_loss = loss.ewm(
-        alpha=1/14, adjust=False
+        alpha=1 / 14,
+        min_periods=14,
+        adjust=False
     ).mean()
 
-    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rs = avg_gain / avg_loss.replace(
+        0,
+        np.nan
+    )
 
-    d["RSI"] = (
-        100 - (100 / (1 + rs))
-    ).fillna(50)
+    d["RSI"] = 100 - (
+        100 / (1 + rs)
+    )
 
-    previous = close.shift(1)
+    # ATR
+    previous_close = d["close"].shift(1)
 
-    tr = pd.concat([
-        d["high"] - d["low"],
-        (d["high"] - previous).abs(),
-        (d["low"] - previous).abs()
-    ], axis=1).max(axis=1)
+    tr = pd.concat(
+        [
+            d["high"] - d["low"],
+            (
+                d["high"] -
+                previous_close
+            ).abs(),
+            (
+                d["low"] -
+                previous_close
+            ).abs()
+        ],
+        axis=1
+    ).max(axis=1)
 
     d["ATR"] = tr.ewm(
-        alpha=1/14, adjust=False
+        alpha=1 / 14,
+        min_periods=14,
+        adjust=False
     ).mean()
 
-    ema12 = close.ewm(span=12).mean()
-    ema26 = close.ewm(span=26).mean()
+    # ADX
+    up_move = d["high"].diff()
 
-    d["MACD"] = ema12 - ema26
-    d["MACD_SIGNAL"] = d["MACD"].ewm(span=9).mean()
+    down_move = -d["low"].diff()
 
-    d["MACD_HIST"] = (
-        d["MACD"] - d["MACD_SIGNAL"]
+    plus_dm = up_move.where(
+        (
+            (up_move > down_move) &
+            (up_move > 0)
+        ),
+        0.0
     )
 
-    d["BB_MID"] = close.rolling(20).mean()
-    std = close.rolling(20).std()
-
-    d["BB_UPPER"] = d["BB_MID"] + 2 * std
-    d["BB_LOWER"] = d["BB_MID"] - 2 * std
-
-    d["ATR_PERCENT"] = (
-        d["ATR"] / close
-    ) * 100
-
-    up = d["high"].diff()
-    down = -d["low"].diff()
-
-    plus_dm = up.where(
-        (up > down) & (up > 0), 0
+    minus_dm = down_move.where(
+        (
+            (down_move > up_move) &
+            (down_move > 0)
+        ),
+        0.0
     )
 
-    minus_dm = down.where(
-        (down > up) & (down > 0), 0
+    atr_safe = d["ATR"].replace(
+        0,
+        np.nan
     )
 
     plus_di = (
-        100 * plus_dm.ewm(alpha=1/14).mean()
-        / d["ATR"].replace(0, np.nan)
+        100 *
+        plus_dm.ewm(
+            alpha=1 / 14,
+            min_periods=14,
+            adjust=False
+        ).mean() /
+        atr_safe
     )
 
     minus_di = (
-        100 * minus_dm.ewm(alpha=1/14).mean()
-        / d["ATR"].replace(0, np.nan)
+        100 *
+        minus_dm.ewm(
+            alpha=1 / 14,
+            min_periods=14,
+            adjust=False
+        ).mean() /
+        atr_safe
     )
 
     dx = (
-        100 * (plus_di - minus_di).abs()
-        / (plus_di + minus_di).replace(0, np.nan)
+        100 *
+        (plus_di - minus_di).abs() /
+        (plus_di + minus_di).replace(
+            0,
+            np.nan
+        )
     )
 
-    d["ADX"] = dx.ewm(alpha=1/14).mean().fillna(0)
+    d["ADX"] = dx.ewm(
+        alpha=1 / 14,
+        min_periods=14,
+        adjust=False
+    ).mean()
+
+    # MACD
+    ema12 = d["close"].ewm(
+        span=12,
+        adjust=False
+    ).mean()
+
+    ema26 = d["close"].ewm(
+        span=26,
+        adjust=False
+    ).mean()
+
+    d["MACD"] = ema12 - ema26
+
+    d["MACD_SIGNAL"] = d["MACD"].ewm(
+        span=9,
+        adjust=False
+    ).mean()
+
+    d["MACD_HIST"] = (
+        d["MACD"] -
+        d["MACD_SIGNAL"]
+    )
+
+    # Bollinger
+    d["BB_MID"] = d["close"].rolling(
+        20
+    ).mean()
+
+    std = d["close"].rolling(
+        20
+    ).std()
+
+    d["BB_UPPER"] = (
+        d["BB_MID"] +
+        2 * std
+    )
+
+    d["BB_LOWER"] = (
+        d["BB_MID"] -
+        2 * std
+    )
+
+    # Candle data
+    d["RANGE"] = (
+        d["high"] -
+        d["low"]
+    )
+
+    d["BODY"] = (
+        d["close"] -
+        d["open"]
+    ).abs()
+
+    d["BODY_RATIO"] = (
+        d["BODY"] /
+        d["RANGE"].replace(
+            0,
+            np.nan
+        )
+    )
 
     return d
 
 
-def candle_pattern(d):
-    if len(d) < 2:
-        return "Insufficient data"
+# =========================================================
+# CANDLE PATTERN
+# =========================================================
+def candle_pattern(row):
 
-    a = d.iloc[-1]
-    p = d.iloc[-2]
+    o = float(row["open"])
+    h = float(row["high"])
+    l = float(row["low"])
+    c = float(row["close"])
 
-    body = abs(a["close"] - a["open"])
-    total = max(a["high"] - a["low"], 1e-10)
-
-    upper = a["high"] - max(a["open"], a["close"])
-    lower = min(a["open"], a["close"]) - a["low"]
-
-    if body / total < 0.10:
-        return "Doji"
-
-    if (
-        lower > body * 2
-        and a["close"] > a["open"]
-    ):
-        return "Bullish Pin Bar"
-
-    if (
-        upper > body * 2
-        and a["close"] < a["open"]
-    ):
-        return "Bearish Pin Bar"
-
-    if (
-        a["close"] > a["open"]
-        and p["close"] < p["open"]
-        and a["close"] > p["open"]
-    ):
-        return "Bullish Engulfing"
-
-    if (
-        a["close"] < a["open"]
-        and p["close"] > p["open"]
-        and a["close"] < p["open"]
-    ):
-        return "Bearish Engulfing"
-
-    return "No clear pattern"
-
-
-def volatility(d):
-    values = d["ATR_PERCENT"].dropna()
-
-    if len(values) < 30:
-        return "Insufficient data"
-
-    current = values.iloc[-1]
-    average = values.tail(100).median()
-
-    if average == 0:
-        return "Unavailable"
-
-    ratio = current / average
-
-    if ratio >= 1.7:
-        return "Very High"
-    elif ratio >= 1.25:
-        return "High"
-    elif ratio <= 0.65:
-        return "Low"
-
-    return "Normal"
-
-
-def session_name():
-    hour = datetime.now(timezone.utc).hour
-
-    sessions = []
-
-    if 0 <= hour < 9:
-        sessions.append("Asian")
-
-    if 7 <= hour < 16:
-        sessions.append("London")
-
-    if 13 <= hour < 22:
-        sessions.append("New York")
-
-    return ", ".join(sessions) if sessions else "Between sessions"
-
-
-def market_analysis(d, rr):
-    last = d.iloc[-1]
-
-    bullish = (
-        last["EMA20"] > last["EMA50"]
-        > last["EMA200"]
+    rng = max(
+        h - l,
+        1e-10
     )
 
-    bearish = (
-        last["EMA20"] < last["EMA50"]
-        < last["EMA200"]
+    body = abs(
+        c - o
     )
 
-    buy_score = 0
-    sell_score = 0
+    upper = h - max(
+        o,
+        c
+    )
 
-    if bullish:
-        buy_score += 2
+    lower = min(
+        o,
+        c
+    ) - l
 
-    if bearish:
-        sell_score += 2
+    ratio = body / rng
 
-    if last["close"] > last["EMA20"]:
-        buy_score += 1
-
-    if last["close"] < last["EMA20"]:
-        sell_score += 1
-
-    if last["RSI"] > 52:
-        buy_score += 1
-
-    if last["RSI"] < 48:
-        sell_score += 1
-
-    if last["MACD_HIST"] > 0:
-        buy_score += 1
-
-    if last["MACD_HIST"] < 0:
-        sell_score += 1
-
-    if last["ADX"] >= 20:
-        if last["EMA20"] > last["EMA50"]:
-            buy_score += 1
-        elif last["EMA20"] < last["EMA50"]:
-            sell_score += 1
-
-    signal = "WAIT"
-    entry = None
-    sl = None
-    targets = []
-    score = max(buy_score, sell_score) * 10
+    if ratio < 0.15:
+        return "DOJI"
 
     if (
-        buy_score >= 5
-        and buy_score >= sell_score + 2
-        and last["close"] > last["EMA50"]
+        lower >= body * 2 and
+        upper <= body
     ):
-        signal = "BUY"
-        entry = float(last["close"])
-        sl = entry - 1.5 * float(last["ATR"])
-        risk = entry - sl
 
-        targets = [
-            entry + risk * rr,
-            entry + risk * rr * 2,
-            entry + risk * rr * 3
-        ]
+        return (
+            "BULLISH PIN"
+            if c >= o
+            else "PIN BAR"
+        )
 
-        score = min(95, 50 + (buy_score - sell_score) * 8)
+    if (
+        upper >= body * 2 and
+        lower <= body
+    ):
+
+        return (
+            "BEARISH PIN"
+            if c <= o
+            else "PIN BAR"
+        )
+
+    if ratio >= 0.65:
+
+        if c > o:
+            return "STRONG BULL"
+        else:
+            return "STRONG BEAR"
+
+    return "NORMAL"
+
+
+# =========================================================
+# MARKET REGIME
+# =========================================================
+def market_regime(row):
+
+    adx = float(row["ADX"])
+    atr = float(row["ATR"])
+    close = float(row["close"])
+
+    ema20 = float(row["EMA20"])
+    ema50 = float(row["EMA50"])
+    ema200 = float(row["EMA200"])
+
+    if not np.isfinite(
+        adx
+    ):
+
+        return "UNKNOWN"
+
+    if adx >= 30:
+
+        if (
+            ema20 >
+            ema50 >
+            ema200
+        ):
+
+            return "STRONG UPTREND"
+
+        if (
+            ema20 <
+            ema50 <
+            ema200
+        ):
+
+            return "STRONG DOWNTREND"
+
+        return "STRONG TREND"
+
+    if adx < 15:
+
+        return "CHOPPY / RANGE"
+
+    if (
+        close > ema20 >
+        ema50
+    ):
+
+        return "UPTREND"
+
+    if (
+        close < ema20 <
+        ema50
+    ):
+
+        return "DOWNTREND"
+
+    if atr <= 0:
+
+        return "RANGE"
+
+    return "RANGE"
+
+
+# =========================================================
+# SIGNAL ENGINE
+# =========================================================
+def calculate_signal(
+    df,
+    row,
+    minimum_score=6
+):
+
+    close = float(row["close"])
+    ema20 = float(row["EMA20"])
+    ema50 = float(row["EMA50"])
+    ema200 = float(row["EMA200"])
+
+    rsi = float(row["RSI"])
+    adx = float(row["ADX"])
+
+    macd = float(row["MACD"])
+    macd_signal = float(
+        row["MACD_SIGNAL"]
+    )
+
+    pattern = candle_pattern(
+        row
+    )
+
+    regime = market_regime(
+        row
+    )
+
+    buy = 0
+    sell = 0
+
+    reasons_buy = []
+    reasons_sell = []
+
+    # 1 Price / EMA20
+    if close > ema20:
+
+        buy += 1
+        reasons_buy.append(
+            "Price > EMA20"
+        )
+
+    if close < ema20:
+
+        sell += 1
+        reasons_sell.append(
+            "Price < EMA20"
+        )
+
+    # 2 EMA20 / EMA50
+    if ema20 > ema50:
+
+        buy += 1
+        reasons_buy.append(
+            "EMA20 > EMA50"
+        )
+
+    if ema20 < ema50:
+
+        sell += 1
+        reasons_sell.append(
+            "EMA20 < EMA50"
+        )
+
+    # 3 EMA50 / EMA200
+    if ema50 > ema200:
+
+        buy += 1
+        reasons_buy.append(
+            "EMA50 > EMA200"
+        )
+
+    if ema50 < ema200:
+
+        sell += 1
+        reasons_sell.append(
+            "EMA50 < EMA200"
+        )
+
+    # 4 RSI
+    if rsi >= 55:
+
+        buy += 1
+        reasons_buy.append(
+            f"RSI {rsi:.1f}"
+        )
+
+    if rsi <= 45:
+
+        sell += 1
+        reasons_sell.append(
+            f"RSI {rsi:.1f}"
+        )
+
+    # 5 MACD
+    if macd > macd_signal:
+
+        buy += 1
+        reasons_buy.append(
+            "MACD bullish"
+        )
+
+    if macd < macd_signal:
+
+        sell += 1
+        reasons_sell.append(
+            "MACD bearish"
+        )
+
+    # 6 ADX
+    if adx >= 18:
+
+        if buy > sell:
+
+            buy += 1
+            reasons_buy.append(
+                "ADX confirms trend"
+            )
+
+        elif sell > buy:
+
+            sell += 1
+            reasons_sell.append(
+                "ADX confirms trend"
+            )
+
+    # 7 Candle confirmation
+    if pattern in [
+        "BULLISH PIN",
+        "STRONG BULL"
+    ]:
+
+        buy += 1
+        reasons_buy.append(
+            pattern
+        )
+
+    if pattern in [
+        "BEARISH PIN",
+        "STRONG BEAR"
+    ]:
+
+        sell += 1
+        reasons_sell.append(
+            pattern
+        )
+
+    # 8 Breakout
+    recent_high = df["high"].iloc[
+        -7:-1
+    ].max()
+
+    recent_low = df["low"].iloc[
+        -7:-1
+    ].min()
+
+    if close > recent_high:
+
+        buy += 1
+        reasons_buy.append(
+            "Range breakout"
+        )
+
+    if close < recent_low:
+
+        sell += 1
+        reasons_sell.append(
+            "Range breakdown"
+        )
+
+    # 9 Momentum
+    if len(df) >= 4:
+
+        previous_close = float(
+            df["close"].iloc[-4]
+        )
+
+        if close > previous_close:
+
+            buy += 1
+
+        elif close < previous_close:
+
+            sell += 1
+
+    max_score = 9
+
+    if (
+        buy >= minimum_score and
+        buy > sell
+    ):
+
+        signal = (
+            "STRONG BUY"
+            if buy >= 8
+            else "BUY"
+        )
+
+        confidence = round(
+            buy / max_score * 100,
+            1
+        )
 
     elif (
-        sell_score >= 5
-        and sell_score >= buy_score + 2
-        and last["close"] < last["EMA50"]
+        sell >= minimum_score and
+        sell > buy
     ):
-        signal = "SELL"
-        entry = float(last["close"])
-        sl = entry + 1.5 * float(last["ATR"])
+
+        signal = (
+            "STRONG SELL"
+            if sell >= 8
+            else "SELL"
+        )
+
+        confidence = round(
+            sell / max_score * 100,
+            1
+        )
+
+    else:
+
+        signal = "WAIT"
+
+        confidence = round(
+            max(
+                buy,
+                sell
+            ) /
+            max_score *
+            100,
+            1
+        )
+
+    return {
+        "signal": signal,
+        "buy_score": buy,
+        "sell_score": sell,
+        "max_score": max_score,
+        "confidence": confidence,
+        "pattern": pattern,
+        "regime": regime,
+        "buy_reasons": reasons_buy,
+        "sell_reasons": reasons_sell
+    }
+
+
+# =========================================================
+# SMART SL / TP
+# =========================================================
+def make_trade(
+    row,
+    signal,
+    rr1,
+    rr2,
+    rr3
+):
+
+    if signal not in [
+        "BUY",
+        "STRONG BUY",
+        "SELL",
+        "STRONG SELL"
+    ]:
+
+        return None
+
+    entry = float(
+        row["close"]
+    )
+
+    atr = float(
+        row["ATR"]
+    )
+
+    if not np.isfinite(
+        atr
+    ) or atr <= 0:
+
+        return None
+
+    recent_low = float(
+        row.name
+    ) if False else 0
+
+    # ATR protection
+    if "BUY" in signal:
+
+        sl = entry - 1.5 * atr
+
+        risk = entry - sl
+
+        tp1 = entry + risk * rr1
+        tp2 = entry + risk * rr2
+        tp3 = entry + risk * rr3
+
+        direction = "BUY"
+
+    else:
+
+        sl = entry + 1.5 * atr
+
         risk = sl - entry
 
-        targets = [
-            entry - risk * rr,
-            entry - risk * rr * 2,
-            entry - risk * rr * 3
-        ]
-
-        score = min(95, 50 + (sell_score - buy_score) * 8)
-
-    trend = (
-        "Bullish" if bullish
-        else "Bearish" if bearish
-        else "Sideways / Mixed"
-    )
-
-    return signal, trend, entry, sl, targets, score
-
-
-def backtest(d):
-    x = d.copy()
-
-    future = x["close"].shift(-5)
-
-    buy = (
-        (x["EMA20"] > x["EMA50"])
-        & (x["EMA50"] > x["EMA200"])
-        & (x["RSI"] > 52)
-        & (x["MACD_HIST"] > 0)
-    )
-
-    sell = (
-        (x["EMA20"] < x["EMA50"])
-        & (x["EMA50"] < x["EMA200"])
-        & (x["RSI"] < 48)
-        & (x["MACD_HIST"] < 0)
-    )
-
-    valid = future.notna()
-    signals = (buy | sell) & valid
-
-    selected = x.loc[signals]
-
-    if selected.empty:
-        return 0, 0, 0
-
-    directions = np.where(buy.loc[signals], 1, -1)
-
-    moves = (
-        future.loc[signals].values
-        - selected["close"].values
-    ) * directions
-
-    wins = int((moves > 0).sum())
-
-    return len(selected), wins, wins / len(selected) * 100
-
-
-with st.sidebar:
-    st.header("Market Settings")
-
-    symbol = st.selectbox("Market", SYMBOLS)
-
-    timeframe = st.selectbox(
-        "Timeframe", list(TIMEFRAMES.keys()),
-        index=3
-    )
-
-    rr = st.selectbox(
-        "Risk Reward", [1, 1.5, 2, 2.5, 3],
-        index=2
-    )
-
-    risk_amount = st.number_input(
-        "Risk Amount", min_value=0.0,
-        value=10.0
-    )
-
-    mtf = st.checkbox(
-        "Multi-Timeframe Analysis",
-        value=False
-    )
-
-    st.caption(
-        "MTF uses extra API credits. Keep OFF when credits are low."
-    )
-
-if not API_KEY:
-    st.error(
-        "TWELVE_DATA_API_KEY missing from Streamlit Secrets."
-    )
-    st.stop()
-
-try:
-    with st.spinner("Loading market data..."):
-        raw = get_data(
-            symbol, TIMEFRAMES[timeframe], API_KEY
-        )
-
-except Exception as e:
-    st.error(f"Market data error: {e}")
-    st.stop()
-
-if len(raw) < 210:
-    st.warning(
-        "Less than 210 candles received. EMA200 analysis may be limited."
-    )
-
-df = indicators(raw)
-last = df.iloc[-1]
-
-signal, trend, entry, sl, targets, score = market_analysis(
-    df, rr
-)
-
-pattern = candle_pattern(df)
-vol = volatility(df)
-
-st.subheader(f"{symbol} | {timeframe} Market Overview")
-
-c1, c2, c3, c4 = st.columns(4)
-
-c1.metric("Price", f"{last['close']:.5f}")
-c2.metric("Trend", trend)
-c3.metric("RSI", f"{last['RSI']:.2f}")
-c4.metric("ADX", f"{last['ADX']:.2f}")
-
-st.caption(
-    "Latest candle UTC: "
-    + last["datetime"].strftime("%Y-%m-%d %H:%M")
-)
-
-st.divider()
-st.subheader("Trade Signal")
-
-s1, s2, s3 = st.columns(3)
-
-s1.metric("Signal", signal)
-s2.metric("Signal Quality", f"{score}/100")
-s3.metric("Volatility", vol)
-
-if signal != "WAIT":
-    a, b, c, e, f = st.columns(5)
-
-    a.metric("Entry", f"{entry:.5f}")
-    b.metric("Stop Loss", f"{sl:.5f}")
-    c.metric("TP1", f"{targets[0]:.5f}")
-    e.metric("TP2", f"{targets[1]:.5f}")
-    f.metric("TP3", f"{targets[2]:.5f}")
-
-    st.caption(
-        f"Risk amount entered: {risk_amount:.2f}. "
-        "Lot size is not calculated without verified broker contract data."
-    )
-else:
-    st.info("WAIT: No qualifying setup. Avoid forcing a trade.")
-
-st.divider()
-
-left, middle, right = st.columns(3)
-
-with left:
-    st.subheader("Indicators")
-    st.write(f"EMA20: {last['EMA20']:.5f}")
-    st.write(f"EMA50: {last['EMA50']:.5f}")
-    st.write(f"EMA200: {last['EMA200']:.5f}")
-    st.write(f"ATR: {last['ATR']:.5f}")
-    st.write(f"MACD: {last['MACD']:.5f}")
-    st.write(f"Bollinger Upper: {last['BB_UPPER']:.5f}")
-    st.write(f"Bollinger Lower: {last['BB_LOWER']:.5f}")
-
-with middle:
-    st.subheader("Candle & Structure")
-    st.write(f"Pattern: {pattern}")
-
-    recent = df.tail(50)
-
-    support = recent["low"].min()
-    resistance = recent["high"].max()
-
-    st.write(f"Support: {support:.5f}")
-    st.write(f"Resistance: {resistance:.5f}")
-
-    if last["close"] > resistance:
-        st.write("Possible bullish breakout")
-    elif last["close"] < support:
-        st.write("Possible bearish breakout")
-    else:
-        st.write("No clear 50-candle breakout")
-
-with right:
-    st.subheader("Trading Session")
-    st.write(session_name())
-    st.write(f"Volatility: {vol}")
-
-    if last["ADX"] < 15:
-        st.warning("Weak trend / choppy market")
-
-    if last["RSI"] >= 75 or last["RSI"] <= 25:
-        st.warning("RSI extreme: reversal risk")
-
-    if vol == "Very High":
-        st.warning("Very high volatility")
-
-# Reversal warning
-st.subheader("Trend Reversal Warning")
-
-previous = df.iloc[-2]
-
-if (
-    last["EMA20"] > last["EMA50"]
-    and last["MACD_HIST"] < 0
-):
-    st.warning(
-        "Bullish EMA alignment but negative MACD momentum."
-    )
-
-elif (
-    last["EMA20"] < last["EMA50"]
-    and last["MACD_HIST"] > 0
-):
-    st.warning(
-        "Bearish EMA alignment but positive MACD momentum."
-    )
-
-elif (
-    previous["RSI"] > 70
-    and last["RSI"] < previous["RSI"]
-):
-    st.warning("RSI turning down from an extreme.")
-
-else:
-    st.success("No reversal warning from current rules.")
-
-# No trade zone
-st.subheader("No Trade Zone")
-
-reasons = []
-
-if last["ADX"] < 15:
-    reasons.append("Weak trend")
-
-if vol == "Very High":
-    reasons.append("Very high volatility")
-
-if pattern == "Doji":
-    reasons.append("Doji candle")
-
-if signal == "WAIT":
-    reasons.append("No valid signal")
-
-if reasons:
-    st.warning(", ".join(reasons))
-else:
-    st.info("No current no-trade filter triggered.")
-
-# Chart
-st.divider()
-st.subheader("Price Chart")
-
-view = df.tail(180)
-
-fig = go.Figure()
-
-fig.add_trace(go.Candlestick(
-    x=view["datetime"],
-    open=view["open"],
-    high=view["high"],
-    low=view["low"],
-    close=view["close"],
-    name="Price"
-))
-
-for column, name in [
-    ("EMA20", "EMA 20"),
-    ("EMA50", "EMA 50"),
-    ("EMA200", "EMA 200")
-]:
-    fig.add_trace(go.Scatter(
-        x=view["datetime"],
-        y=view[column],
-        name=name
-    ))
-
-if signal != "WAIT":
-    fig.add_hline(
-        y=entry, line_dash="dot",
-        annotation_text="Entry"
-    )
-
-    fig.add_hline(
-        y=sl, line_dash="dash",
-        annotation_text="SL"
-    )
-
-    for i, target in enumerate(targets, 1):
-        fig.add_hline(
-            y=target, line_dash="dash",
-            annotation_text=f"TP{i}"
-        )
-
-fig.update_layout(
-    height=600,
-    xaxis_rangeslider_visible=False
-)
-
-st.plotly_chart(fig, use_container_width=True)
-
+        tp1 = entry - risk * rr1
+        tp2 = entry - risk * rr2
+        tp3 = entry - risk * rr3
+
+        direction = "SELL"
+
+    return {
+        "direction": direction,
+        "entry": entry,
+        "sl": sl,
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
+        "risk": risk
+    }
+
+
+# =========================================================
 # MTF
-st.divider()
-st.subheader("Multi-Timeframe Analysis")
-
-if mtf:
-    st.warning(
-        "This will make additional API calls and consume credits."
-    )
+# =========================================================
+def get_mtf(
+    key,
+    sym,
+    size,
+    minimum_score
+):
 
     rows = []
 
-    try:
-        for label, interval in TIMEFRAMES.items():
+    for tf in MTF_INTERVALS:
 
-            if label == timeframe:
-                mdf = df
-            else:
-                mraw = get_data(symbol, interval, API_KEY)
-                mdf = indicators(mraw)
+        try:
 
-            m = mdf.iloc[-1]
-
-            mt = (
-                "Bullish"
-                if m["EMA20"] > m["EMA50"] > m["EMA200"]
-                else "Bearish"
-                if m["EMA20"] < m["EMA50"] < m["EMA200"]
-                else "Sideways"
+            raw = get_data(
+                key,
+                sym,
+                tf,
+                min(
+                    size,
+                    250
+                )
             )
 
-            rows.append({
-                "Timeframe": label,
-                "Trend": mt,
-                "RSI": round(m["RSI"], 2)
-            })
+            data = indicators(
+                raw
+            )
 
-        st.dataframe(
-            pd.DataFrame(rows),
-            use_container_width=True
-        )
+            if len(data) >= 2:
 
-    except Exception as e:
-        st.error(f"MTF unavailable: {e}")
+                row = data.iloc[-2]
 
-else:
-    st.caption("MTF disabled to save API credits.")
+            else:
 
-# Backtesting
-st.divider()
-st.subheader("Historical Directional Check")
+                row = data.iloc[-1]
 
-st.caption(
-    "This simplified test checks direction after five candles. "
-    "It is not a complete profit backtest and excludes spread, "
-    "commission and slippage."
-)
+            info = calculate_signal(
+                data,
+                row,
+                minimum_score
+            )
 
-trades, wins, rate = backtest(df)
+            rows.append(
+                {
+                    "Timeframe": tf,
+                    "Signal": info["signal"],
+                    "BUY": info["buy_score"],
+                    "SELL": info["sell_score"],
+                    "Confidence": f"{info['confidence']:.0f}%",
+                    "Regime": info["regime"]
+                }
+            )
 
-b1, b2, b3 = st.columns(3)
+        except Exception as e:
 
-b1.metric("Signals", trades)
-b2.metric("Correct Direction", wins)
-b3.metric("Directional Hit Rate", f"{rate:.1f}%")
+            rows.append(
+                {
+                    "Timeframe": tf,
+                    "Signal": "ERROR",
+                    "BUY": "-",
+                    "SELL": "-",
+                    "Confidence": "-",
+                    "Regime": str(e)[:35]
+                }
+            )
 
-# Trade journal
-st.divider()
-st.subheader("Trade Journal")
-
-if "journal" not in st.session_state:
-    st.session_state.journal = []
-
-with st.form("trade_form"):
-
-    j_market = st.selectbox(
-        "Market", SYMBOLS, key="journal_market"
+    return pd.DataFrame(
+        rows
     )
 
-    j_direction = st.selectbox(
-        "Direction", ["BUY", "SELL"]
-    )
 
-    j_result = st.selectbox(
-        "Result", ["Win", "Loss", "Break-even", "Open"]
-    )
+def mtf_vote(
+    table
+):
 
-    j_entry = st.number_input(
-        "Entry Price", min_value=0.0,
-        value=float(last["close"])
-    )
+    if table.empty:
 
-    j_note = st.text_input("Trade Note")
+        return "UNKNOWN"
 
-    save = st.form_submit_button("Save Trade")
+    buy = 0
+    sell = 0
 
-    if save:
-        st.session_state.journal.append({
-            "Time UTC": datetime.now(
-                timezone.utc
-            ).strftime("%Y-%m-%d %H:%M"),
-            "Market": j_market,
-            "Direction": j_direction,
-            "Result": j_result,
-            "Entry": j_entry,
-            "Note": j_note
-        })
+    for signal in table["Signal"]:
 
-        st.success("Trade saved in this session.")
+        if "BUY" in str(signal):
 
-if st.session_state.journal:
-    journal_df = pd.DataFrame(
-        st.session_state.journal
-    )
+            buy += 1
 
-    st.dataframe(
-        journal_df,
-        use_container_width=True
-    )
-
-    st.download_button(
-        "Download Journal CSV",
-        journal_df.to_csv(index=False),
-        "trade_journal.csv",
-        "text/csv"
-    )
-
-# Data connection status
-st.divider()
-st.subheader("Data Connection Status")
-
-d1, d2, d3 = st.columns(3)
-
-d1.metric("Market Data", "Connected")
-d2.metric("Latest Candle", last["datetime"].strftime("%H:%M UTC"))
-d3.metric("API Credit Balance", "Unavailable")
-
-st.info(
-    "Exact API credits must be checked in your Twelve Data account. "
-    "The candle response does not provide a reliable remaining-credit balance."
-)
-
-st.warning(
-    "Live news, live broker spread, push alerts and MT5 execution "
-    "are not connected. No unavailable live data is fabricated."
-)
-
-with st.expander("Dashboard Limitations"):
-    st.write("""
-    - Signals use technical rules, not a trained AI prediction model.
-    - Entry uses the latest returned candle close.
-    - SL uses 1.5 ATR.
-    - Support, resistance and structure are simplified approximations.
-    - Session times use approximate UTC windows.
-    - No signal guarantees profit or accuracy.
-    - Confirm spread, news and execution on your broker.
-    """)
-
-st.caption(
-    "Educational analysis only. Forex and CFD trading involves substantial risk."
-)
+        elif "SELL" i
