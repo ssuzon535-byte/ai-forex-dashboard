@@ -307,6 +307,7 @@ def signal_row(row):
         and row["BODY_RATIO"] >= 0.25
         and bool(row["BULL_CANDLE"])
     )
+
     sell = (
         bear_count >= 2 and biases["15M"] == -1
         and row["close"] < row["EMA20"]
@@ -325,11 +326,14 @@ def signal_row(row):
         direction = "WAIT"
 
     relevant_scores = [scores[x] for x in TIMEFRAMES]
-    agree = (
-        sum(1 for x in relevant_scores
-            if (x > 0 if direction == "BUY" else x < 0))
-        if direction != "WAIT" else 0
-    )
+
+    if direction == "BUY":
+        agree = sum(1 for x in relevant_scores if x > 0)
+    elif direction == "SELL":
+        agree = sum(1 for x in relevant_scores if x < 0)
+    else:
+        agree = 0
+
     quality = int(np.clip(
         30 + agree * 8 + min(float(row["ADX"]), 35) * 0.6
         + float(row["BODY_RATIO"]) * 10,
