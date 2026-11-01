@@ -43,7 +43,15 @@ INTERVALS = {
     "5M": "5min",
 }
 
-MTF_INTERVALS = ["1h", "15min", "10min", "5min"]
+def smart_mtf_intervals(main_interval):
+    """Return only useful higher-timeframe checks; avoid duplicate/lower TF API calls."""
+    mapping = {
+        "5min": ["15min", "1h"],
+        "10min": ["1h"],
+        "15min": ["1h"],
+        "1h": [],
+    }
+    return mapping.get(main_interval, ["1h"])
 
 st.title("📊 AI Forex Market Analysis V2")
 st.caption(
@@ -109,6 +117,7 @@ with st.sidebar:
         value=True,
         help="If enabled, conflicting higher-timeframe direction becomes WAIT.",
     )
+    st.caption("Smart MTF: 15M→1H, 10M→1H, 5M→15M+1H, 1H→no extra MTF request.")
 
     min_score = st.slider(
         "Minimum technical score",
@@ -132,16 +141,15 @@ if not api_key:
 # Twelve Data API connection test
 # -----------------------------
 def test_twelve_data_api(api_key, symbols, interval="15min"):
-    """Test Twelve Data connectivity for all supported markets."""
+    """Rate-limit-aware connectivity test for supported markets."""
     results = {}
-
-    for market_name, market_symbol in symbols.items():
+    url = "https://api.twelvedata.com/time_series"
+    for name, test_symbol in symbols.items():
         try:
-            url = "https://api.twelvedata.com/time_series"
             response = requests.get(
                 url,
                 params={
-                    "symbol": market_symbol,
+                    "symbol": test_symbol,
                     "interval": interval,
                     "outputsize": 2,
                     "apikey": api_key,
@@ -149,59 +157,29 @@ def test_twelve_data_api(api_key, symbols, interval="15min"):
                 },
                 timeout=15,
             )
-
             if response.status_code == 429:
-                results[market_name] = {
-                    "status": "RATE LIMIT",
-                    "message": "HTTP 429 — Too many requests",
-                }
-                continue
-
+                results[name] = {"status": "RATE LIMIT", "message": "HTTP 429 — too many requests"}
+                # Do not hammer the provider after a rate limit.
+                break
             response.raise_for_status()
             data = response.json()
-
             if data.get("status") == "error":
-                results[market_name] = {
-                    "status": "ERROR",
-                    "message": data.get("message", "Twelve Data API error"),
-                }
+                results[name] = {"status": "ERROR", "message": data.get("message", "Provider error")}
                 continue
-
-            values = data.get("values")
-            if not isinstance(values, list) or not values:
-                results[market_name] = {
-                    "status": "ERROR",
-                    "message": "No candle values returned",
-                }
+            values = data.get("values") or []
+            if not values:
+                results[name] = {"status": "ERROR", "message": "No candle data returned"}
                 continue
-
-            latest = values[0]
-            results[market_name] = {
+            results[name] = {
                 "status": "OK",
-                "message": "Live data received",
-                "symbol": data.get("meta", {}).get("symbol", market_symbol),
-                "interval": data.get("meta", {}).get("interval", interval),
-                "candles": len(values),
-                "datetime": latest.get("datetime"),
-                "close": float(latest["close"]),
+                "message": f"{len(values)} candles · latest close {float(values[0]['close']):,.5f}",
             }
-
         except requests.exceptions.Timeout:
-            results[market_name] = {
-                "status": "ERROR",
-                "message": "API timeout",
-            }
+            results[name] = {"status": "ERROR", "message": "Timeout"}
         except requests.exceptions.RequestException as exc:
-            results[market_name] = {
-                "status": "ERROR",
-                "message": str(exc),
-            }
+            results[name] = {"status": "ERROR", "message": str(exc)[:100]}
         except Exception as exc:
-            results[market_name] = {
-                "status": "ERROR",
-                "message": str(exc),
-            }
-
+            results[name] = {"status": "ERROR", "message": str(exc)[:100]}
     return results
 
 
@@ -210,34 +188,22 @@ with st.sidebar:
     st.subheader("🔌 API Connection")
 
     if st.button("🧪 Test Twelve Data API — All Markets", use_container_width=True):
-        with st.spinner("Testing all supported markets..."):
-            api_results = test_twelve_data_api(api_key, SYMBOLS, interval)
-
-        st.write("### API Test Results")
-
+        st.warning("This test makes multiple API requests. If a 429 rate limit appears, wait before testing again.")
+        with st.spinner("Testing supported markets..."):
+            api_results = test_twelve_data_api(api_key, SYMBOLS, "15min")
         for market_name, result in api_results.items():
-            status = result["status"]
-
-            if status == "OK":
-                st.success(
-                    f"✅ {market_name} ({result['symbol']}) — "
-                    f"{result['candles']} candles • Close {result['close']:,.5f}"
-                )
-            elif status == "RATE LIMIT":
-                st.warning(f"⏳ {market_name} — {result['message']}")
+            if result["status"] == "OK":
+                st.success(f"✅ {market_name}: {result['message']}")
+            elif result["status"] == "RATE LIMIT":
+                st.warning(f"⏳ {market_name}: {result['message']}")
             else:
-                st.error(f"❌ {market_name} — {result['message']}")
-
-        st.caption(
-            "⚠️ This test sends one API request per supported market, "
-            "so it can temporarily trigger Twelve Data rate limits."
-        )
+                st.error(f"❌ {market_name}: {result['message']}")
 
 
 # -----------------------------
 # Data
 # -----------------------------
-@st.cache_data(ttl=45, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
 def fetch_candles(api_key, symbol, interval, outputsize):
     url = "https://api.twelvedata.com/time_series"
     response = requests.get(
@@ -251,6 +217,8 @@ def fetch_candles(api_key, symbol, interval, outputsize):
         },
         timeout=20,
     )
+    if response.status_code == 429:
+        raise RuntimeError("Twelve Data rate limit (429). Please wait 30–60 seconds before retrying.")
     response.raise_for_status()
     data = response.json()
 
@@ -608,116 +576,76 @@ def add_trade_levels(df):
 # Backtest
 # -----------------------------
 def backtest(df, min_score=6, rr=2.0):
+    """Conservative non-overlapping bar-by-bar backtest."""
     trades = []
-
     if len(df) < 100:
-        return pd.DataFrame(), {}
+        return pd.DataFrame(), {"trades": 0, "wins": 0, "losses": 0, "win_rate": 0.0, "profit_factor": 0.0, "net_r": 0.0, "max_drawdown_r": 0.0}
 
-    for i in range(100, len(df) - 1):
+    i = 100
+    while i < len(df) - 1:
         row = df.iloc[i]
         result = get_signal(row, df.iloc[: i + 1], min_score=min_score)
-
         if result["signal"] not in ["BUY", "STRONG BUY", "SELL", "STRONG SELL"]:
+            i += 1
             continue
 
         trade = build_trade(row, result["signal"], 1.0, rr, rr)
         if trade is None:
+            i += 1
             continue
 
-        # No look-ahead: entry is next candle open.
-        next_bar = df.iloc[i + 1]
+        next_i = i + 1
+        next_bar = df.iloc[next_i]
         entry = float(next_bar["open"])
         direction = trade["direction"]
-
-        # Rebuild levels from the next-bar entry using the same risk distance.
-        risk = trade["risk_distance"]
-        if direction == "BUY":
-            sl = entry - risk
-            tp = entry + risk * rr
-        else:
-            sl = entry + risk
-            tp = entry - risk * rr
+        risk = float(trade["risk_distance"])
+        sl = entry - risk if direction == "BUY" else entry + risk
+        tp = entry + risk * rr if direction == "BUY" else entry - risk * rr
 
         outcome = None
         exit_price = None
         exit_time = None
+        exit_i = next_i
 
-        for j in range(i + 1, len(df)):
+        for j in range(next_i, len(df)):
             bar = df.iloc[j]
-
-            if direction == "BUY":
-                hit_sl = bar["low"] <= sl
-                hit_tp = bar["high"] >= tp
-            else:
-                hit_sl = bar["high"] >= sl
-                hit_tp = bar["low"] <= tp
-
-            # Conservative rule: if both are touched in one candle, count SL first.
+            hit_sl = bar["low"] <= sl if direction == "BUY" else bar["high"] >= sl
+            hit_tp = bar["high"] >= tp if direction == "BUY" else bar["low"] <= tp
             if hit_sl:
-                outcome = "LOSS"
-                exit_price = sl
-                exit_time = bar["datetime"]
+                outcome, exit_price = "LOSS", sl
+                exit_time, exit_i = bar["datetime"], j
                 break
             if hit_tp:
-                outcome = "WIN"
-                exit_price = tp
-                exit_time = bar["datetime"]
+                outcome, exit_price = "WIN", tp
+                exit_time, exit_i = bar["datetime"], j
                 break
 
         if outcome is None:
-            continue
+            break
 
-        r = 1.0 if outcome == "WIN" else -1.0
-
-        trades.append(
-            {
-                "time": next_bar["datetime"],
-                "direction": direction,
-                "entry": entry,
-                "SL": sl,
-                "TP": tp,
-                "result": outcome,
-                "R": r,
-                "exit_time": exit_time,
-                "score": result["score"],
-                "regime": result["regime"],
-            }
-        )
+        trades.append({
+            "time": next_bar["datetime"], "direction": direction, "entry": entry,
+            "SL": sl, "TP": tp, "result": outcome, "R": 1.0 if outcome == "WIN" else -1.0,
+            "exit_time": exit_time, "score": result["score"], "regime": result["regime"],
+        })
+        # Crucial: do not open another simulated trade while this one was active.
+        i = max(exit_i + 1, i + 1)
 
     trades_df = pd.DataFrame(trades)
-
     if trades_df.empty:
-        return trades_df, {
-            "trades": 0,
-            "wins": 0,
-            "losses": 0,
-            "win_rate": 0.0,
-            "profit_factor": 0.0,
-            "net_r": 0.0,
-            "max_drawdown_r": 0.0,
-        }
+        return trades_df, {"trades": 0, "wins": 0, "losses": 0, "win_rate": 0.0, "profit_factor": 0.0, "net_r": 0.0, "max_drawdown_r": 0.0}
 
     wins = int((trades_df["result"] == "WIN").sum())
     losses = int((trades_df["result"] == "LOSS").sum())
-    win_rate = wins / len(trades_df) * 100
-
     gross_profit = float(trades_df.loc[trades_df["R"] > 0, "R"].sum())
     gross_loss = abs(float(trades_df.loc[trades_df["R"] < 0, "R"].sum()))
-    profit_factor = gross_profit / gross_loss if gross_loss > 0 else np.inf
-
     equity = trades_df["R"].cumsum()
-    peak = equity.cummax()
-    drawdown = equity - peak
-    max_dd = abs(float(drawdown.min())) if len(drawdown) else 0.0
-
+    max_dd = abs(float((equity - equity.cummax()).min())) if len(equity) else 0.0
     return trades_df, {
-        "trades": len(trades_df),
-        "wins": wins,
-        "losses": losses,
-        "win_rate": win_rate,
-        "profit_factor": profit_factor,
-        "net_r": float(trades_df["R"].sum()),
-        "max_drawdown_r": max_dd,
+        "trades": len(trades_df), "wins": wins, "losses": losses,
+        "win_rate": wins / len(trades_df) * 100,
+        "profit_factor": gross_profit / gross_loss if gross_loss > 0 else np.inf,
+        "net_r": float(trades_df["R"].sum()), "max_drawdown_r": max_dd,
     }
 
 
@@ -757,10 +685,10 @@ def direction_stats(trades_df):
 # -----------------------------
 # MTF
 # -----------------------------
-def mtf_analysis(api_key, symbol, outputsize):
+def mtf_analysis(api_key, symbol, outputsize, main_interval):
     results = []
 
-    for tf in MTF_INTERVALS:
+    for tf in smart_mtf_intervals(interval):
         try:
             raw, _ = fetch_candles(api_key, symbol, tf, min(outputsize, 200))
             data = add_trade_levels(add_indicators(raw))
@@ -806,10 +734,13 @@ def mtf_direction(mtf_df):
     buy = directions.count("BUY")
     sell = directions.count("SELL")
 
-    if buy >= 3 and buy > sell:
+    # Smart MTF uses at most two higher timeframes. Require a clear majority.
+    if buy > sell and buy >= max(1, int(np.ceil(len(directions) * 0.67))):
         return "BUY"
-    if sell >= 3 and sell > buy:
+    if sell > buy and sell >= max(1, int(np.ceil(len(directions) * 0.67))):
         return "SELL"
+    if buy == 0 and sell == 0:
+        return "CONFLICT"
     return "CONFLICT"
 
 
@@ -820,7 +751,11 @@ try:
     raw_df, meta = fetch_candles(api_key, symbol, interval, outputsize)
     df = add_trade_levels(add_indicators(raw_df))
 except Exception as exc:
-    st.error(f"Market data error: {exc}")
+    if "429" in str(exc):
+        st.warning(f"⚠️ Market data temporarily rate-limited: {exc}")
+        st.info("Wait 30–60 seconds, then use Refresh market data. Avoid repeatedly pressing API Test or Refresh.")
+    else:
+        st.error(f"Market data error: {exc}")
     st.stop()
 
 # Use closed candle by default to reduce signal flipping/repainting.
@@ -854,7 +789,7 @@ mtf_dir = "OFF"
 
 if mtf_enabled:
     try:
-        mtf_df = mtf_analysis(api_key, symbol, outputsize)
+        mtf_df = mtf_analysis(api_key, symbol, outputsize, interval)
         mtf_dir = mtf_direction(mtf_df)
     except Exception as exc:
         st.warning(f"MTF data unavailable: {exc}")
@@ -989,6 +924,10 @@ with right:
     if not bt_trades.empty:
         stats_df = direction_stats(bt_trades)
         st.dataframe(stats_df, use_container_width=True, hide_index=True)
+        if bt_stats["trades"] < 20:
+            st.warning(f"⚠️ Only {bt_stats['trades']} closed trades. Accuracy is not statistically reliable yet; aim for at least 20–30 trades before judging the strategy.")
+        else:
+            st.success("Backtest sample size is large enough for a more useful first-pass comparison (still not a guarantee of future performance).")
 
 # -----------------------------
 # MTF table
@@ -998,7 +937,7 @@ if mtf_enabled:
     if not mtf_df.empty:
         st.dataframe(mtf_df, use_container_width=True, hide_index=True)
         st.caption(
-            "Higher timeframe alignment is used as a filter; it does not guarantee a profitable trade."
+            "Smart MTF checks only useful higher timeframes to reduce API requests. Higher timeframe alignment is a filter, not a profit guarantee."
         )
 
 # -----------------------------
@@ -1097,4 +1036,4 @@ st.divider()
 st.caption(
     "Data source: Twelve Data API. The dashboard uses technical rules and historical "
     "simulation; it does not predict the market with certainty and does not execute trades."
-            )
+        )
