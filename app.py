@@ -6,14 +6,14 @@ import plotly.graph_objects as go
 from datetime import datetime, timezone
 
 st.set_page_config(
-    page_title="AI Forex Dashboard",
+    page_title="AI Forex Market Dashboard",
     page_icon="📈",
     layout="wide"
 )
 
 SYMBOLS = {
-    "Gold XAU/USD": "XAU/USD",
-    "Silver XAG/USD": "XAG/USD",
+    "Gold (XAU/USD)": "XAU/USD",
+    "Silver (XAG/USD)": "XAG/USD",
     "EUR/USD": "EUR/USD",
     "GBP/USD": "GBP/USD",
     "USD/JPY": "USD/JPY",
@@ -30,14 +30,14 @@ SYMBOLS = {
     "USD/BDT": "USD/BDT",
 }
 
-TIMEFRAMES = {
+INTERVALS = {
     "1H": "1h",
     "15M": "15min",
     "10M": "10min",
     "5M": "5min",
 }
 
-st.title("📈 AI Forex Market Dashboard")
+st.title("AI Forex Market Dashboard")
 st.caption(
     "Technical analysis dashboard. Signals are estimates, "
     "not guaranteed trading recommendations."
@@ -52,21 +52,21 @@ with st.sidebar:
     )
     symbol = SYMBOLS[market_name]
 
-    tf_name = st.selectbox(
+    timeframe_label = st.selectbox(
         "Timeframe",
-        list(TIMEFRAMES.keys()),
+        list(INTERVALS.keys()),
         index=3
     )
-    interval = TIMEFRAMES[tf_name]
+    interval = INTERVALS[timeframe_label]
 
     candle_count = st.selectbox(
-        "Candles",
+        "Candles to load",
         [100, 150, 200, 300],
         index=2
     )
 
     st.divider()
-    st.subheader("Risk Management")
+    st.subheader("Risk Settings")
 
     balance = st.number_input(
         "Account Balance (USD)",
@@ -76,7 +76,7 @@ with st.sidebar:
     )
 
     risk_percent = st.number_input(
-        "Risk Per Trade (%)",
+        "Risk per Trade (%)",
         min_value=0.1,
         max_value=5.0,
         value=1.0,
@@ -84,21 +84,21 @@ with st.sidebar:
     )
 
     rr1 = st.number_input(
-        "TP1 Risk/Reward",
+        "TP1 Risk:Reward",
         min_value=0.5,
         max_value=10.0,
         value=1.0
     )
 
     rr2 = st.number_input(
-        "TP2 Risk/Reward",
+        "TP2 Risk:Reward",
         min_value=0.5,
         max_value=10.0,
         value=2.0
     )
 
     rr3 = st.number_input(
-        "TP3 Risk/Reward",
+        "TP3 Risk:Reward",
         min_value=0.5,
         max_value=10.0,
         value=3.0
@@ -110,7 +110,7 @@ with st.sidebar:
     )
 
     st.caption(
-        "MTF uses additional API credits. Keep it off "
+        "MTF uses extra API credits. Keep it off "
         "if your credits are limited."
     )
 
@@ -138,6 +138,7 @@ def fetch_candles(api_key, symbol, interval, count):
         },
         timeout=20,
     )
+
     response.raise_for_status()
     data = response.json()
 
@@ -162,8 +163,11 @@ def fetch_candles(api_key, symbol, interval, count):
     df = (
         df.dropna(
             subset=[
-                "datetime", "open", "high",
-                "low", "close"
+                "datetime",
+                "open",
+                "high",
+                "low",
+                "close",
             ]
         )
         .sort_values("datetime")
@@ -280,14 +284,20 @@ def add_indicators(df):
 
 def get_signal(row):
     required = [
-        "close", "EMA20", "EMA50", "EMA200",
-        "RSI", "MACD", "MACD_Signal", "ADX"
+        "close",
+        "EMA20",
+        "EMA50",
+        "EMA200",
+        "RSI",
+        "MACD",
+        "MACD_Signal",
+        "ADX",
     ]
 
     if any(pd.isna(row[x]) for x in required):
         return "WAIT", 0, "Insufficient indicator data"
 
-    buy = [
+    buy_checks = [
         row["close"] > row["EMA20"],
         row["EMA20"] > row["EMA50"],
         row["EMA50"] > row["EMA200"],
@@ -296,7 +306,7 @@ def get_signal(row):
         row["ADX"] > 18,
     ]
 
-    sell = [
+    sell_checks = [
         row["close"] < row["EMA20"],
         row["EMA20"] < row["EMA50"],
         row["EMA50"] < row["EMA200"],
@@ -305,38 +315,55 @@ def get_signal(row):
         row["ADX"] > 18,
     ]
 
-    buy_score = sum(buy)
-    sell_score = sum(sell)
+    buy_score = sum(buy_checks)
+    sell_score = sum(sell_checks)
 
     if buy_score >= 5 and buy_score > sell_score:
-        return "BUY", round(buy_score / 6 * 100), "Bullish conditions"
+        return (
+            "BUY",
+            round(buy_score / 6 * 100),
+            "Bullish technical conditions"
+        )
 
     if sell_score >= 5 and sell_score > buy_score:
-        return "SELL", round(sell_score / 6 * 100), "Bearish conditions"
+        return (
+            "SELL",
+            round(sell_score / 6 * 100),
+            "Bearish technical conditions"
+        )
 
     score = max(buy_score, sell_score)
-    return "WAIT", round(score / 6 * 100), "Mixed conditions"
+
+    return (
+        "WAIT",
+        round(score / 6 * 100),
+        "Mixed or weak conditions"
+    )
 
 
 def trade_levels(row, signal, rewards):
     entry = float(row["close"])
     atr = row["ATR"]
 
-    if signal not in ["BUY", "SELL"] or pd.isna(atr) or atr <= 0:
+    if (
+        signal not in ["BUY", "SELL"]
+        or pd.isna(atr)
+        or atr <= 0
+    ):
         return entry, np.nan, [np.nan, np.nan, np.nan]
 
-    risk_distance = float(atr) * 1.5
+    distance = float(atr) * 1.5
 
     if signal == "BUY":
-        sl = entry - risk_distance
+        sl = entry - distance
         targets = [
-            entry + risk_distance * reward
+            entry + distance * reward
             for reward in rewards
         ]
     else:
-        sl = entry + risk_distance
+        sl = entry + distance
         targets = [
-            entry - risk_distance * reward
+            entry - distance * reward
             for reward in rewards
         ]
 
@@ -356,12 +383,16 @@ def detect_patterns(df):
     )
 
     body = abs(current["close"] - current["open"])
-    upper_wick = current["high"] - max(
-        current["open"], current["close"]
+
+    upper_wick = (
+        current["high"]
+        - max(current["open"], current["close"])
     )
-    lower_wick = min(
-        current["open"], current["close"]
-    ) - current["low"]
+
+    lower_wick = (
+        min(current["open"], current["close"])
+        - current["low"]
+    )
 
     patterns = []
 
@@ -416,7 +447,11 @@ def run_backtest(df, reward=2.0):
                     "Entry Time": position["time"],
                     "Side": position["side"],
                     "Entry": position["entry"],
-                    "Exit": position["sl"] if hit_sl else position["tp"],
+                    "Exit": (
+                        position["sl"]
+                        if hit_sl
+                        else position["tp"]
+                    ),
                     "R Result": result,
                 })
 
@@ -458,11 +493,14 @@ def run_backtest(df, reward=2.0):
 
 try:
     with st.spinner("Loading market data..."):
-        raw, metadata = fetch_candles(
-            api_key, symbol, interval, candle_count
+        raw_df, metadata = fetch_candles(
+            api_key,
+            symbol,
+            interval,
+            candle_count
         )
 
-    df = add_indicators(raw)
+    df = add_indicators(raw_df)
 
 except Exception as error:
     st.error(f"Market data error: {error}")
@@ -481,7 +519,9 @@ last = df.iloc[-1]
 signal, quality, reason = get_signal(last)
 
 entry, sl, targets = trade_levels(
-    last, signal, [rr1, rr2, rr3]
+    last,
+    signal,
+    [rr1, rr2, rr3]
 )
 
 support = float(df["low"].tail(50).min())
@@ -510,11 +550,12 @@ else:
     trend = "Sideways / Mixed"
 
 st.caption(
-    f"Market: {symbol} | Timeframe: {tf_name} | "
+    f"Market: {symbol} | Timeframe: {timeframe_label} | "
     f"Latest candle: {last['datetime']}"
 )
 
 c1, c2, c3, c4 = st.columns(4)
+
 c1.metric("Latest Price", f"{last['close']:.5f}")
 c2.metric("Signal", signal, f"Quality: {quality}/100")
 c3.metric("Trend", trend)
@@ -523,6 +564,7 @@ c4.metric("Volatility", volatility)
 st.subheader("Trade Setup")
 
 p1, p2, p3, p4, p5 = st.columns(5)
+
 p1.metric("Entry Reference", f"{entry:.5f}")
 p2.metric("Stop Loss", f"{sl:.5f}" if pd.notna(sl) else "N/A")
 p3.metric("TP1", f"{targets[0]:.5f}" if pd.notna(targets[0]) else "N/A")
@@ -534,8 +576,8 @@ st.write(f"**Support estimate:** {support:.5f}")
 st.write(f"**Resistance estimate:** {resistance:.5f}")
 
 st.caption(
-    "Entry is the latest candle close for reference, not a live "
-    "execution price. SL/TP are ATR-based estimates."
+    "Entry is the latest candle close for reference only, "
+    "not a live execution price. SL/TP are ATR-based estimates."
 )
 
 tabs = st.tabs([
@@ -578,7 +620,7 @@ with tabs[0]:
     ))
 
     chart.update_layout(
-        title=f"{symbol} - {tf_name}",
+        title=f"{symbol} - {timeframe_label}",
         height=600,
         xaxis_rangeslider_visible=False,
     )
@@ -586,10 +628,24 @@ with tabs[0]:
     st.plotly_chart(chart, use_container_width=True)
 
     a, b, c, d = st.columns(4)
-    a.metric("RSI", f"{last['RSI']:.2f}" if pd.notna(last["RSI"]) else "N/A")
-    b.metric("ADX", f"{last['ADX']:.2f}" if pd.notna(last["ADX"]) else "N/A")
-    c.metric("MACD", f"{last['MACD']:.5f}" if pd.notna(last["MACD"]) else "N/A")
-    d.metric("ATR", f"{last['ATR']:.5f}" if pd.notna(last["ATR"]) else "N/A")
+
+    a.metric(
+        "RSI",
+        f"{last['RSI']:.2f}" if pd.notna(last["RSI"]) else "N/A"
+    )
+    b.metric(
+        "ADX",
+        f"{last['ADX']:.2f}" if pd.notna(last["ADX"]) else "N/A"
+    )
+    c.metric(
+        "MACD",
+        f"{last['MACD']:.5f}" if pd.notna(last["MACD"]) else "N/A"
+    )
+    d.metric(
+        "ATR",
+        f"{last['ATR']:.5f}" if pd.notna(last["ATR"]) else "N/A"
+    )
+
 
 with tabs[1]:
     st.subheader("Candle Patterns")
@@ -597,8 +653,17 @@ with tabs[1]:
     for pattern in detect_patterns(df):
         st.write(f"- {pattern}")
 
-    recent_high = df["high"].iloc[-21:-1].max() if len(df) >= 22 else df["high"].max()
-    recent_low = df["low"].iloc[-21:-1].min() if len(df) >= 22 else df["low"].min()
+    recent_high = (
+        df["high"].iloc[-21:-1].max()
+        if len(df) >= 22
+        else df["high"].max()
+    )
+
+    recent_low = (
+        df["low"].iloc[-21:-1].min()
+        if len(df) >= 22
+        else df["low"].min()
+    )
 
     if last["close"] > recent_high:
         st.success("Possible bullish range breakout.")
@@ -613,9 +678,13 @@ with tabs[1]:
     if signal == "WAIT" or (
         pd.notna(last["ADX"]) and last["ADX"] < 15
     ):
-        st.warning("Possible no-trade condition: mixed or weak trend.")
+        st.warning(
+            "Possible no-trade condition: mixed or weak trend."
+        )
     else:
-        st.info("The basic filter did not flag a weak-trend condition.")
+        st.info(
+            "The basic filter did not flag a weak-trend condition."
+        )
 
     st.caption(
         "Breakout is a simple price-range check. This version does "
@@ -623,10 +692,12 @@ with tabs[1]:
         "order blocks."
     )
 
+
 with tabs[2]:
     st.subheader("Risk Calculator")
 
     r1, r2, r3 = st.columns(3)
+
     r1.metric("Risk Amount", f"${risk_cash:.2f}")
     r2.metric("Risk Percentage", f"{risk_percent:.2f}%")
     r3.metric("TP2 Reward/Risk", f"1:{rr2:g}")
@@ -640,6 +711,7 @@ with tabs[2]:
         "For Exness, check the exact symbol specifications in MT5 "
         "before calculating lot size."
     )
+
 
 with tabs[3]:
     st.subheader("Historical Backtest")
@@ -659,8 +731,18 @@ with tabs[3]:
         )
     else:
         wins = int((bt["R Result"] > 0).sum())
-        gross_profit = bt.loc[bt["R Result"] > 0, "R Result"].sum()
-        gross_loss = abs(bt.loc[bt["R Result"] < 0, "R Result"].sum())
+
+        gross_profit = bt.loc[
+            bt["R Result"] > 0,
+            "R Result"
+        ].sum()
+
+        gross_loss = abs(
+            bt.loc[
+                bt["R Result"] < 0,
+                "R Result"
+            ].sum()
+        )
 
         profit_factor = (
             gross_profit / gross_loss
@@ -672,6 +754,7 @@ with tabs[3]:
         drawdown = (equity.cummax() - equity).max()
 
         m1, m2, m3, m4 = st.columns(4)
+
         m1.metric("Closed Trades", str(len(bt)))
         m2.metric("Win Rate", f"{wins / len(bt) * 100:.1f}%")
         m3.metric(
@@ -681,6 +764,7 @@ with tabs[3]:
         m4.metric("Max Drawdown", f"{drawdown:.2f}R")
 
         st.metric("Net Result", f"{bt['R Result'].sum():.2f}R")
+
         st.dataframe(bt.tail(100), use_container_width=True)
 
         st.download_button(
@@ -697,6 +781,7 @@ with tabs[3]:
         "live trading."
     )
 
+
 with tabs[4]:
     st.subheader("Trade Journal")
 
@@ -708,14 +793,26 @@ with tabs[4]:
     with st.form("journal_form"):
         j_market = st.text_input("Market", value=symbol)
         j_side = st.selectbox("Side", ["BUY", "SELL"])
+
         j_entry = st.number_input(
-            "Entry Price", min_value=0.0, value=float(last["close"])
+            "Entry Price",
+            min_value=0.0,
+            value=float(last["close"])
         )
+
         j_exit = st.number_input(
-            "Exit Price", min_value=0.0, value=float(last["close"])
+            "Exit Price",
+            min_value=0.0,
+            value=float(last["close"])
         )
-        j_pl = st.number_input("Profit/Loss USD", value=0.0)
+
+        j_pl = st.number_input(
+            "Profit/Loss USD",
+            value=0.0
+        )
+
         j_notes = st.text_input("Notes")
+
         submitted = st.form_submit_button("Add Journal Entry")
 
     if "journal_rows" not in st.session_state:
@@ -723,7 +820,9 @@ with tabs[4]:
 
     if submitted:
         st.session_state.journal_rows.append({
-            "Time UTC": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            "Time UTC": datetime.now(
+                timezone.utc
+            ).strftime("%Y-%m-%d %H:%M:%S"),
             "Market": j_market,
             "Side": j_side,
             "Entry": j_entry,
@@ -733,44 +832,21 @@ with tabs[4]:
         })
 
     if st.session_state.journal_rows:
-        journal = pd.DataFrame(st.session_state.journal_rows)
+        journal = pd.DataFrame(
+            st.session_state.journal_rows
+        )
 
-        st.dataframe(journal, use_container_width=True)
-        st.metric("Journal Net P/L", f"${journal['P/L USD'].sum():.2f}")
+        st.dataframe(
+            journal,
+            use_container_width=True
+        )
+
+        st.metric(
+            "Journal Net P/L",
+            f"${journal['P/L USD'].sum():.2f}"
+        )
 
         st.download_button(
             "Download Journal CSV",
             journal.to_csv(index=False).encode("utf-8"),
-            file_name="forex_journal.csv",
-            mime="text/csv",
-        )
-    else:
-        st.info("No journal entries yet.")
-
-    st.subheader("Data & Connection Status")
-
-    st.success(f"Market candle data loaded for {symbol} / {tf_name}.")
-    st.write(f"Provider metadata: {metadata if metadata else 'Not supplied'}")
-
-    st.warning(
-        "This version does not connect live news, live spread, "
-        "push alerts, permanent cloud storage, a real AI model or "
-        "Exness MT5 trade execution."
-    )
-
-    if mtf_enabled:
-        st.subheader("Multi-Timeframe Confirmation")
-        mtf_rows = []
-
-        for label, mtf_interval in TIMEFRAMES.items():
-            try:
-                mtf_raw, _ = fetch_candles(
-                    api_key, symbol, mtf_interval, 120
-                )
-                mtf_df = add_indicators(mtf_raw)
-                mtf_last = mtf_df.iloc[-1]
-                mtf_signal, mtf_score, _ = get_signal(mtf_last)
-
-                mtf_rows.append({
-                    "Timeframe": label,
-      
+            file_name="forex
