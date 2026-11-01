@@ -131,70 +131,107 @@ if not api_key:
 # -----------------------------
 # Twelve Data API connection test
 # -----------------------------
-def test_twelve_data_api(api_key, symbol="XAU/USD", interval="15min"):
-    """Small live request used only to verify API access and candle payload."""
-    url = "https://api.twelvedata.com/time_series"
-    response = requests.get(
-        url,
-        params={
-            "symbol": symbol,
-            "interval": interval,
-            "outputsize": 2,
-            "apikey": api_key,
-            "format": "JSON",
-        },
-        timeout=15,
-    )
-    response.raise_for_status()
+def test_twelve_data_api(api_key, symbols, interval="15min"):
+    """Test Twelve Data connectivity for all supported markets."""
+    results = {}
 
-    try:
-        data = response.json()
-    except ValueError as exc:
-        raise ValueError("Twelve Data returned a non-JSON response.") from exc
+    for market_name, market_symbol in symbols.items():
+        try:
+            url = "https://api.twelvedata.com/time_series"
+            response = requests.get(
+                url,
+                params={
+                    "symbol": market_symbol,
+                    "interval": interval,
+                    "outputsize": 2,
+                    "apikey": api_key,
+                    "format": "JSON",
+                },
+                timeout=15,
+            )
 
-    if data.get("status") == "error":
-        raise ValueError(data.get("message", "Twelve Data API returned an error."))
+            if response.status_code == 429:
+                results[market_name] = {
+                    "status": "RATE LIMIT",
+                    "message": "HTTP 429 — Too many requests",
+                }
+                continue
 
-    values = data.get("values")
-    if not isinstance(values, list) or not values:
-        raise ValueError("API connected, but no candle values were returned.")
+            response.raise_for_status()
+            data = response.json()
 
-    required = {"datetime", "open", "high", "low", "close"}
-    missing = required.difference(values[0].keys())
-    if missing:
-        raise ValueError(f"API response is missing fields: {sorted(missing)}")
+            if data.get("status") == "error":
+                results[market_name] = {
+                    "status": "ERROR",
+                    "message": data.get("message", "Twelve Data API error"),
+                }
+                continue
 
-    latest = values[0]
-    return {
-        "symbol": data.get("meta", {}).get("symbol", symbol),
-        "interval": data.get("meta", {}).get("interval", interval),
-        "candles": len(values),
-        "datetime": latest.get("datetime"),
-        "close": float(latest["close"]),
-    }
+            values = data.get("values")
+            if not isinstance(values, list) or not values:
+                results[market_name] = {
+                    "status": "ERROR",
+                    "message": "No candle values returned",
+                }
+                continue
+
+            latest = values[0]
+            results[market_name] = {
+                "status": "OK",
+                "message": "Live data received",
+                "symbol": data.get("meta", {}).get("symbol", market_symbol),
+                "interval": data.get("meta", {}).get("interval", interval),
+                "candles": len(values),
+                "datetime": latest.get("datetime"),
+                "close": float(latest["close"]),
+            }
+
+        except requests.exceptions.Timeout:
+            results[market_name] = {
+                "status": "ERROR",
+                "message": "API timeout",
+            }
+        except requests.exceptions.RequestException as exc:
+            results[market_name] = {
+                "status": "ERROR",
+                "message": str(exc),
+            }
+        except Exception as exc:
+            results[market_name] = {
+                "status": "ERROR",
+                "message": str(exc),
+            }
+
+    return results
 
 
 with st.sidebar:
     st.divider()
     st.subheader("🔌 API Connection")
 
-    if st.button("🧪 Test Twelve Data API", use_container_width=True):
-        with st.spinner("Testing Twelve Data connection..."):
-            try:
-                api_test = test_twelve_data_api(api_key, "XAU/USD", "15min")
-                st.success("✅ API Connected")
-                st.caption(
-                    f"XAU/USD • {api_test['interval']} • "
-                    f"{api_test['candles']} candles received"
+    if st.button("🧪 Test Twelve Data API — All Markets", use_container_width=True):
+        with st.spinner("Testing all supported markets..."):
+            api_results = test_twelve_data_api(api_key, SYMBOLS, interval)
+
+        st.write("### API Test Results")
+
+        for market_name, result in api_results.items():
+            status = result["status"]
+
+            if status == "OK":
+                st.success(
+                    f"✅ {market_name} ({result['symbol']}) — "
+                    f"{result['candles']} candles • Close {result['close']:,.5f}"
                 )
-                st.metric("Latest XAU/USD Close", f"{api_test['close']:,.3f}")
-                st.caption(f"Latest candle: {api_test['datetime']}")
-            except requests.exceptions.Timeout:
-                st.error("❌ API timeout. Twelve Data did not respond in time.")
-            except requests.exceptions.RequestException as exc:
-                st.error(f"❌ Network/API request failed: {exc}")
-            except Exception as exc:
-                st.error(f"❌ API test failed: {exc}")
+            elif status == "RATE LIMIT":
+                st.warning(f"⏳ {market_name} — {result['message']}")
+            else:
+                st.error(f"❌ {market_name} — {result['message']}")
+
+        st.caption(
+            "⚠️ This test sends one API request per supported market, "
+            "so it can temporarily trigger Twelve Data rate limits."
+        )
 
 
 # -----------------------------
@@ -571,40 +608,29 @@ def add_trade_levels(df):
 # Backtest
 # -----------------------------
 def backtest(df, min_score=6, rr=2.0):
-    """Walk-forward backtest with no overlapping trades and no look-ahead."""
     trades = []
+
     if len(df) < 100:
-        return pd.DataFrame(), {
-            "trades": 0, "wins": 0, "losses": 0, "win_rate": 0.0,
-            "profit_factor": 0.0, "net_r": 0.0, "max_drawdown_r": 0.0,
-        }
+        return pd.DataFrame(), {}
 
-    i = 100
-    last_exit_index = 99
-    while i < len(df) - 1:
-        if i <= last_exit_index:
-            i += 1
-            continue
-
+    for i in range(100, len(df) - 1):
         row = df.iloc[i]
         result = get_signal(row, df.iloc[: i + 1], min_score=min_score)
+
         if result["signal"] not in ["BUY", "STRONG BUY", "SELL", "STRONG SELL"]:
-            i += 1
             continue
 
-        setup = build_trade(row, result["signal"], 1.0, rr, rr)
-        if setup is None:
-            i += 1
+        trade = build_trade(row, result["signal"], 1.0, rr, rr)
+        if trade is None:
             continue
 
+        # No look-ahead: entry is next candle open.
         next_bar = df.iloc[i + 1]
         entry = float(next_bar["open"])
-        direction = setup["direction"]
-        risk = float(setup["risk_distance"])
-        if risk <= 0 or not np.isfinite(risk):
-            i += 1
-            continue
+        direction = trade["direction"]
 
+        # Rebuild levels from the next-bar entry using the same risk distance.
+        risk = trade["risk_distance"]
         if direction == "BUY":
             sl = entry - risk
             tp = entry + risk * rr
@@ -615,62 +641,73 @@ def backtest(df, min_score=6, rr=2.0):
         outcome = None
         exit_price = None
         exit_time = None
-        exit_index = None
 
         for j in range(i + 1, len(df)):
             bar = df.iloc[j]
-            if direction == "BUY":
-                hit_sl = float(bar["low"]) <= sl
-                hit_tp = float(bar["high"]) >= tp
-            else:
-                hit_sl = float(bar["high"]) >= sl
-                hit_tp = float(bar["low"]) <= tp
 
-            # Conservative: if both levels are touched in one candle, SL wins.
+            if direction == "BUY":
+                hit_sl = bar["low"] <= sl
+                hit_tp = bar["high"] >= tp
+            else:
+                hit_sl = bar["high"] >= sl
+                hit_tp = bar["low"] <= tp
+
+            # Conservative rule: if both are touched in one candle, count SL first.
             if hit_sl:
-                outcome, exit_price, exit_index = "LOSS", sl, j
+                outcome = "LOSS"
+                exit_price = sl
                 exit_time = bar["datetime"]
                 break
             if hit_tp:
-                outcome, exit_price, exit_index = "WIN", tp, j
+                outcome = "WIN"
+                exit_price = tp
                 exit_time = bar["datetime"]
                 break
 
         if outcome is None:
-            break
+            continue
 
-        trades.append({
-            "time": next_bar["datetime"],
-            "direction": direction,
-            "entry": entry,
-            "SL": sl,
-            "TP": tp,
-            "result": outcome,
-            "R": 1.0 if outcome == "WIN" else -1.0,
-            "exit_time": exit_time,
-            "score": result["score"],
-            "regime": result["regime"],
-        })
+        r = 1.0 if outcome == "WIN" else -1.0
 
-        # Do not allow a new signal while this trade is still open.
-        last_exit_index = int(exit_index)
-        i = last_exit_index + 1
+        trades.append(
+            {
+                "time": next_bar["datetime"],
+                "direction": direction,
+                "entry": entry,
+                "SL": sl,
+                "TP": tp,
+                "result": outcome,
+                "R": r,
+                "exit_time": exit_time,
+                "score": result["score"],
+                "regime": result["regime"],
+            }
+        )
 
     trades_df = pd.DataFrame(trades)
+
     if trades_df.empty:
         return trades_df, {
-            "trades": 0, "wins": 0, "losses": 0, "win_rate": 0.0,
-            "profit_factor": 0.0, "net_r": 0.0, "max_drawdown_r": 0.0,
+            "trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_rate": 0.0,
+            "profit_factor": 0.0,
+            "net_r": 0.0,
+            "max_drawdown_r": 0.0,
         }
 
-    wins = int(trades_df["result"].eq("WIN").sum())
-    losses = int(trades_df["result"].eq("LOSS").sum())
-    win_rate = wins / len(trades_df) * 100.0
+    wins = int((trades_df["result"] == "WIN").sum())
+    losses = int((trades_df["result"] == "LOSS").sum())
+    win_rate = wins / len(trades_df) * 100
+
     gross_profit = float(trades_df.loc[trades_df["R"] > 0, "R"].sum())
     gross_loss = abs(float(trades_df.loc[trades_df["R"] < 0, "R"].sum()))
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else np.inf
+
     equity = trades_df["R"].cumsum()
-    drawdown = equity - equity.cummax()
+    peak = equity.cummax()
+    drawdown = equity - peak
     max_dd = abs(float(drawdown.min())) if len(drawdown) else 0.0
 
     return trades_df, {
@@ -685,30 +722,36 @@ def backtest(df, min_score=6, rr=2.0):
 
 
 def direction_stats(trades_df):
-    """Return BUY/SELL performance without raising a NameError on empty/partial data."""
-    columns = ["Direction", "Trades", "Wins", "Losses", "Accuracy %", "Net R"]
-    if trades_df is None or trades_df.empty:
-        return pd.DataFrame(columns=columns)
-
-    required = {"direction", "result", "R"}
-    if not required.issubset(trades_df.columns):
-        return pd.DataFrame(columns=columns)
+    if trades_df.empty:
+        return pd.DataFrame()
 
     rows = []
-    for direction in ("BUY", "SELL"):
-        part = trades_df.loc[trades_df["direction"].astype(str).eq(direction)]
-        total = int(len(part))
-        wins = int(part["result"].astype(str).eq("WIN").sum()) if total else 0
-        losses = int(part["result"].astype(str).eq("LOSS").sum()) if total else 0
-        rows.append({
-            "Direction": direction,
-            "Trades": total,
-            "Wins": wins,
-            "Losses": losses,
-            "Accuracy %": round((wins / total) * 100, 2) if total else 0.0,
-            "Net R": round(float(pd.to_numeric(part["R"], errors="coerce").fillna(0).sum()), 2) if total else 0.0,
-        })
-    return pd.DataFrame(rows, columns=columns)
+    for direction in ["BUY", "SELL"]:
+        part = trades_df[trades_df["direction"] == direction]
+        if part.empty:
+            rows.append(
+                {
+                    "Direction": direction,
+                    "Trades": 0,
+                    "Wins": 0,
+                    "Losses": 0,
+                    "Accuracy %": 0.0,
+                    "Net R": 0.0,
+                }
+            )
+        else:
+            wins = int((part["result"] == "WIN").sum())
+            rows.append(
+                {
+                    "Direction": direction,
+                    "Trades": len(part),
+                    "Wins": wins,
+                    "Losses": int((part["result"] == "LOSS").sum()),
+                    "Accuracy %": round(wins / len(part) * 100, 2),
+                    "Net R": round(float(part["R"].sum()), 2),
+                }
+            )
+    return pd.DataFrame(rows)
 
 
 # -----------------------------
@@ -939,15 +982,13 @@ with right:
     )
     m4.metric("Net R", f"{bt_stats['net_r']:.2f}")
 
-    st.write(f"Max drawdown: **{bt_stats['max_drawdown_r']:.2f}R**")
-    if bt_stats["trades"] == 0:
-        st.info("No completed historical trades under the current filters; accuracy is not available.")
+    st.write(
+        f"Max drawdown: **{bt_stats['max_drawdown_r']:.2f}R**"
+    )
 
     if not bt_trades.empty:
         stats_df = direction_stats(bt_trades)
         st.dataframe(stats_df, use_container_width=True, hide_index=True)
-        if len(bt_trades) < 20:
-            st.info(f"⚠️ Historical sample is only {len(bt_trades)} completed trades. Win rate is not reliable until more trades are available.")
 
 # -----------------------------
 # MTF table
@@ -1056,4 +1097,4 @@ st.divider()
 st.caption(
     "Data source: Twelve Data API. The dashboard uses technical rules and historical "
     "simulation; it does not predict the market with certainty and does not execute trades."
-    )
+            )
