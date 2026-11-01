@@ -6,14 +6,14 @@ import plotly.graph_objects as go
 from datetime import datetime, timezone
 
 st.set_page_config(
-    page_title="AI Forex Market Dashboard",
+    page_title="AI Forex Dashboard",
     page_icon="📈",
     layout="wide"
 )
 
 SYMBOLS = {
-    "Gold (XAU/USD)": "XAU/USD",
-    "Silver (XAG/USD)": "XAG/USD",
+    "Gold XAU/USD": "XAU/USD",
+    "Silver XAG/USD": "XAG/USD",
     "EUR/USD": "EUR/USD",
     "GBP/USD": "GBP/USD",
     "USD/JPY": "USD/JPY",
@@ -23,67 +23,60 @@ SYMBOLS = {
     "USD/CAD": "USD/CAD",
     "EUR/GBP": "EUR/GBP",
     "EUR/JPY": "EUR/JPY",
-    "EUR/AUD": "EUR/AUD",
-    "EUR/CHF": "EUR/CHF",
     "GBP/JPY": "GBP/JPY",
-    "GBP/AUD": "GBP/AUD",
-    "GBP/CHF": "GBP/CHF",
     "AUD/JPY": "AUD/JPY",
-    "AUD/CAD": "AUD/CAD",
-    "NZD/JPY": "NZD/JPY",
-    "CAD/JPY": "CAD/JPY",
-    "CHF/JPY": "CHF/JPY",
-    "USD/BDT (check provider support)": "USD/BDT",
+    "EUR/AUD": "EUR/AUD",
+    "GBP/AUD": "GBP/AUD",
+    "USD/BDT": "USD/BDT",
 }
 
-INTERVALS = {
+TIMEFRAMES = {
     "1H": "1h",
     "15M": "15min",
     "10M": "10min",
     "5M": "5min",
 }
 
-st.title("AI Forex Market Dashboard")
+st.title("📈 AI Forex Market Dashboard")
 st.caption(
-    "Technical analysis dashboard | Signals are estimates, "
-    "not guaranteed trade recommendations."
+    "Technical analysis dashboard. Signals are estimates, "
+    "not guaranteed trading recommendations."
 )
 
 with st.sidebar:
     st.header("Market Settings")
 
-    selected_name = st.selectbox(
-        "Currency Pair",
-        list(SYMBOLS.keys()),
-        index=0
+    market_name = st.selectbox(
+        "Market",
+        list(SYMBOLS.keys())
     )
-    symbol = SYMBOLS[selected_name]
+    symbol = SYMBOLS[market_name]
 
-    timeframe_label = st.selectbox(
+    tf_name = st.selectbox(
         "Timeframe",
-        list(INTERVALS.keys()),
+        list(TIMEFRAMES.keys()),
         index=3
     )
-    interval = INTERVALS[timeframe_label]
+    interval = TIMEFRAMES[tf_name]
 
-    outputsize = st.select_slider(
-        "Candles to load",
-        options=[100, 150, 200, 300],
-        value=200
+    candle_count = st.selectbox(
+        "Candles",
+        [100, 150, 200, 300],
+        index=2
     )
 
     st.divider()
-    st.subheader("Risk Settings")
+    st.subheader("Risk Management")
 
-    account_balance = st.number_input(
+    balance = st.number_input(
         "Account Balance (USD)",
         min_value=0.0,
         value=1000.0,
         step=100.0
     )
 
-    risk_pct = st.number_input(
-        "Risk per Trade (%)",
+    risk_percent = st.number_input(
+        "Risk Per Trade (%)",
         min_value=0.1,
         max_value=5.0,
         value=1.0,
@@ -91,38 +84,34 @@ with st.sidebar:
     )
 
     rr1 = st.number_input(
-        "TP1 Risk:Reward",
+        "TP1 Risk/Reward",
         min_value=0.5,
         max_value=10.0,
-        value=1.0,
-        step=0.5
+        value=1.0
     )
 
     rr2 = st.number_input(
-        "TP2 Risk:Reward",
+        "TP2 Risk/Reward",
         min_value=0.5,
         max_value=10.0,
-        value=2.0,
-        step=0.5
+        value=2.0
     )
 
     rr3 = st.number_input(
-        "TP3 Risk:Reward",
+        "TP3 Risk/Reward",
         min_value=0.5,
         max_value=10.0,
-        value=3.0,
-        step=0.5
+        value=3.0
     )
 
-    st.divider()
-
     mtf_enabled = st.checkbox(
-        "Multi-Timeframe Confirmation (uses extra API credits)",
+        "Multi-Timeframe Analysis",
         value=False
     )
 
     st.caption(
-        "Keep MTF off if your data API credits are limited."
+        "MTF uses additional API credits. Keep it off "
+        "if your credits are limited."
     )
 
 
@@ -130,62 +119,38 @@ api_key = st.secrets.get("TWELVE_DATA_API_KEY", "")
 
 if not api_key:
     st.error(
-        "Missing TWELVE_DATA_API_KEY. Add it in Streamlit "
-        "Settings → Secrets. Never place your key in public code."
+        "API key missing. Add TWELVE_DATA_API_KEY "
+        "in Streamlit Settings > Secrets."
     )
     st.stop()
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def fetch_candles(api_key, symbol, interval, outputsize):
-    url = "https://api.twelvedata.com/time_series"
-
+def fetch_candles(api_key, symbol, interval, count):
     response = requests.get(
-        url,
+        "https://api.twelvedata.com/time_series",
         params={
             "symbol": symbol,
             "interval": interval,
-            "outputsize": outputsize,
+            "outputsize": count,
             "apikey": api_key,
             "format": "JSON",
         },
         timeout=20,
     )
-
     response.raise_for_status()
     data = response.json()
 
-    if data.get("status") == "error" or "values" not in data:
-        message = data.get(
-            "message",
-            "No candle data returned by the provider."
+    if "values" not in data:
+        raise ValueError(
+            data.get("message", "No candle data returned.")
         )
-        raise ValueError(message)
 
     df = pd.DataFrame(data["values"])
-
-    required = [
-        "datetime",
-        "open",
-        "high",
-        "low",
-        "close"
-    ]
-
-    if not all(col in df.columns for col in required):
-        raise ValueError(
-            "Provider response is missing OHLC candle fields."
-        )
 
     for col in ["open", "high", "low", "close"]:
         df[col] = pd.to_numeric(
             df[col],
-            errors="coerce"
-        )
-
-    if "volume" in df.columns:
-        df["volume"] = pd.to_numeric(
-            df["volume"],
             errors="coerce"
         )
 
@@ -195,7 +160,12 @@ def fetch_candles(api_key, symbol, interval, outputsize):
     )
 
     df = (
-        df.dropna(subset=required)
+        df.dropna(
+            subset=[
+                "datetime", "open", "high",
+                "low", "close"
+            ]
+        )
         .sort_values("datetime")
         .reset_index(drop=True)
     )
@@ -206,20 +176,11 @@ def fetch_candles(api_key, symbol, interval, outputsize):
 def add_indicators(df):
     d = df.copy()
 
-    d["EMA20"] = d["close"].ewm(
-        span=20,
-        adjust=False
-    ).mean()
-
-    d["EMA50"] = d["close"].ewm(
-        span=50,
-        adjust=False
-    ).mean()
-
-    d["EMA200"] = d["close"].ewm(
-        span=200,
-        adjust=False
-    ).mean()
+    for period in [20, 50, 200]:
+        d[f"EMA{period}"] = d["close"].ewm(
+            span=period,
+            adjust=False
+        ).mean()
 
     delta = d["close"].diff()
     gain = delta.clip(lower=0)
@@ -238,16 +199,15 @@ def add_indicators(df):
     ).mean()
 
     rs = avg_gain / avg_loss.replace(0, np.nan)
+    d["RSI"] = 100 - 100 / (1 + rs)
 
-    d["RSI"] = 100 - (100 / (1 + rs))
-
-    prev_close = d["close"].shift(1)
+    previous_close = d["close"].shift(1)
 
     tr = pd.concat(
         [
             d["high"] - d["low"],
-            (d["high"] - prev_close).abs(),
-            (d["low"] - prev_close).abs(),
+            (d["high"] - previous_close).abs(),
+            (d["low"] - previous_close).abs(),
         ],
         axis=1
     ).max(axis=1)
@@ -258,7 +218,6 @@ def add_indicators(df):
         adjust=False
     ).mean()
 
-    # Directional movement and ADX
     up_move = d["high"].diff()
     down_move = -d["low"].diff()
 
@@ -272,31 +231,25 @@ def add_indicators(df):
         0.0
     )
 
+    plus_smoothed = plus_dm.ewm(
+        alpha=1 / 14,
+        min_periods=14,
+        adjust=False
+    ).mean()
+
+    minus_smoothed = minus_dm.ewm(
+        alpha=1 / 14,
+        min_periods=14,
+        adjust=False
+    ).mean()
+
     atr_safe = d["ATR"].replace(0, np.nan)
 
-    plus_di = (
-        100
-        * plus_dm.ewm(
-            alpha=1 / 14,
-            min_periods=14,
-            adjust=False
-        ).mean()
-        / atr_safe
-    )
-
-    minus_di = (
-        100
-        * minus_dm.ewm(
-            alpha=1 / 14,
-            min_periods=14,
-            adjust=False
-        ).mean()
-        / atr_safe
-    )
+    plus_di = 100 * plus_smoothed / atr_safe
+    minus_di = 100 * minus_smoothed / atr_safe
 
     dx = (
-        100
-        * (plus_di - minus_di).abs()
+        100 * (plus_di - minus_di).abs()
         / (plus_di + minus_di).replace(0, np.nan)
     )
 
@@ -311,211 +264,160 @@ def add_indicators(df):
         - d["close"].ewm(span=26, adjust=False).mean()
     )
 
-    d["MACD_signal"] = d["MACD"].ewm(
+    d["MACD_Signal"] = d["MACD"].ewm(
         span=9,
         adjust=False
     ).mean()
 
-    d["BB_mid"] = d["close"].rolling(20).mean()
+    d["BB_Mid"] = d["close"].rolling(20).mean()
+    deviation = d["close"].rolling(20).std()
 
-    bb_std = d["close"].rolling(20).std()
-
-    d["BB_upper"] = d["BB_mid"] + 2 * bb_std
-    d["BB_lower"] = d["BB_mid"] - 2 * bb_std
-
-    if "volume" in d.columns:
-        d["volume_avg"] = d["volume"].rolling(20).mean()
-    else:
-        d["volume_avg"] = np.nan
+    d["BB_Upper"] = d["BB_Mid"] + 2 * deviation
+    d["BB_Lower"] = d["BB_Mid"] - 2 * deviation
 
     return d
 
 
 def get_signal(row):
-    values = [
-        row["close"],
-        row["EMA20"],
-        row["EMA50"],
-        row["EMA200"],
-        row["RSI"],
-        row["MACD"],
-        row["MACD_signal"],
-        row["ADX"],
+    required = [
+        "close", "EMA20", "EMA50", "EMA200",
+        "RSI", "MACD", "MACD_Signal", "ADX"
     ]
 
-    if not all(pd.notna(value) for value in values):
-        return (
-            "WAIT",
-            0,
-            "Not enough valid indicator data"
-        )
+    if any(pd.isna(row[x]) for x in required):
+        return "WAIT", 0, "Insufficient indicator data"
 
-    buy_checks = [
+    buy = [
         row["close"] > row["EMA20"],
         row["EMA20"] > row["EMA50"],
         row["EMA50"] > row["EMA200"],
         row["RSI"] > 52,
-        row["MACD"] > row["MACD_signal"],
+        row["MACD"] > row["MACD_Signal"],
         row["ADX"] > 18,
     ]
 
-    sell_checks = [
+    sell = [
         row["close"] < row["EMA20"],
         row["EMA20"] < row["EMA50"],
         row["EMA50"] < row["EMA200"],
         row["RSI"] < 48,
-        row["MACD"] < row["MACD_signal"],
+        row["MACD"] < row["MACD_Signal"],
         row["ADX"] > 18,
     ]
 
-    buy_score = sum(buy_checks)
-    sell_score = sum(sell_checks)
+    buy_score = sum(buy)
+    sell_score = sum(sell)
 
     if buy_score >= 5 and buy_score > sell_score:
-        return (
-            "BUY",
-            int(round(buy_score / 6 * 100)),
-            "Bullish technical conditions"
-        )
+        return "BUY", round(buy_score / 6 * 100), "Bullish conditions"
 
     if sell_score >= 5 and sell_score > buy_score:
-        return (
-            "SELL",
-            int(round(sell_score / 6 * 100)),
-            "Bearish technical conditions"
-        )
+        return "SELL", round(sell_score / 6 * 100), "Bearish conditions"
 
-    return (
-        "WAIT",
-        int(round(max(buy_score, sell_score) / 6 * 100)),
-        "Conditions are mixed or trend strength is limited"
-    )
+    score = max(buy_score, sell_score)
+    return "WAIT", round(score / 6 * 100), "Mixed conditions"
 
 
-def make_trade_levels(row, signal, rr_values):
+def trade_levels(row, signal, rewards):
     entry = float(row["close"])
+    atr = row["ATR"]
 
-    atr = (
-        float(row["ATR"])
-        if pd.notna(row["ATR"]) and row["ATR"] > 0
-        else np.nan
-    )
+    if signal not in ["BUY", "SELL"] or pd.isna(atr) or atr <= 0:
+        return entry, np.nan, [np.nan, np.nan, np.nan]
 
-    if signal == "BUY" and pd.notna(atr):
-        sl = entry - 1.5 * atr
-        risk = entry - sl
+    risk_distance = float(atr) * 1.5
 
+    if signal == "BUY":
+        sl = entry - risk_distance
         targets = [
-            entry + risk * reward
-            for reward in rr_values
+            entry + risk_distance * reward
+            for reward in rewards
+        ]
+    else:
+        sl = entry + risk_distance
+        targets = [
+            entry - risk_distance * reward
+            for reward in rewards
         ]
 
-        return entry, sl, targets
-
-    if signal == "SELL" and pd.notna(atr):
-        sl = entry + 1.5 * atr
-        risk = sl - entry
-
-        targets = [
-            entry - risk * reward
-            for reward in rr_values
-        ]
-
-        return entry, sl, targets
-
-    return entry, np.nan, [np.nan, np.nan, np.nan]
+    return entry, sl, targets
 
 
-def pattern_labels(df):
+def detect_patterns(df):
     if len(df) < 2:
         return ["Not enough candles"]
 
-    c = df.iloc[-1]
-    p = df.iloc[-2]
+    current = df.iloc[-1]
+    previous = df.iloc[-2]
 
     candle_range = max(
-        c["high"] - c["low"],
+        current["high"] - current["low"],
         1e-12
     )
 
-    body = abs(c["close"] - c["open"])
-
-    upper_wick = (
-        c["high"] - max(c["open"], c["close"])
+    body = abs(current["close"] - current["open"])
+    upper_wick = current["high"] - max(
+        current["open"], current["close"]
     )
+    lower_wick = min(
+        current["open"], current["close"]
+    ) - current["low"]
 
-    lower_wick = (
-        min(c["open"], c["close"]) - c["low"]
-    )
-
-    found = []
+    patterns = []
 
     if body / candle_range < 0.1:
-        found.append("Doji-like candle")
+        patterns.append("Doji-like candle")
+
+    if lower_wick > body * 2:
+        patterns.append("Possible bullish pin bar")
+
+    if upper_wick > body * 2:
+        patterns.append("Possible bearish pin bar")
 
     if (
-        lower_wick > body * 2
-        and upper_wick < body * 1.5
+        current["close"] > current["open"]
+        and previous["close"] < previous["open"]
+        and current["close"] >= previous["open"]
+        and current["open"] <= previous["close"]
     ):
-        found.append("Possible bullish pin bar")
+        patterns.append("Bullish engulfing")
 
     if (
-        upper_wick > body * 2
-        and lower_wick < body * 1.5
+        current["close"] < current["open"]
+        and previous["close"] > previous["open"]
+        and current["close"] <= previous["open"]
+        and current["open"] >= previous["close"]
     ):
-        found.append("Possible bearish pin bar")
+        patterns.append("Bearish engulfing")
 
-    if (
-        c["close"] > c["open"]
-        and p["close"] < p["open"]
-        and c["close"] >= p["open"]
-        and c["open"] <= p["close"]
-    ):
-        found.append("Bullish engulfing")
-
-    if (
-        c["close"] < c["open"]
-        and p["close"] > p["open"]
-        and c["close"] <= p["open"]
-        and c["open"] >= p["close"]
-    ):
-        found.append("Bearish engulfing")
-
-    return found or ["No common pattern detected"]
+    return patterns or ["No common pattern detected"]
 
 
-def run_backtest(df, rr=2.0, sl_atr=1.5):
+def run_backtest(df, reward=2.0):
     trades = []
     position = None
 
     for i in range(205, len(df) - 1):
         row = df.iloc[i]
-        nxt = df.iloc[i + 1]
+        next_row = df.iloc[i + 1]
 
         if position is not None:
             if position["side"] == "BUY":
-                hit_sl = nxt["low"] <= position["sl"]
-                hit_tp = nxt["high"] >= position["tp"]
+                hit_sl = next_row["low"] <= position["sl"]
+                hit_tp = next_row["high"] >= position["tp"]
             else:
-                hit_sl = nxt["high"] >= position["sl"]
-                hit_tp = nxt["low"] <= position["tp"]
+                hit_sl = next_row["high"] >= position["sl"]
+                hit_tp = next_row["low"] <= position["tp"]
 
             if hit_sl or hit_tp:
-                # If both levels are touched, count SL first.
-                outcome = -1.0 if hit_sl else rr
-
-                exit_price = (
-                    position["sl"]
-                    if hit_sl
-                    else position["tp"]
-                )
+                result = -1.0 if hit_sl else reward
 
                 trades.append({
                     "Entry Time": position["time"],
                     "Side": position["side"],
                     "Entry": position["entry"],
-                    "Exit": exit_price,
-                    "R Result": outcome,
+                    "Exit": position["sl"] if hit_sl else position["tp"],
+                    "R Result": result,
                 })
 
                 position = None
@@ -525,386 +427,350 @@ def run_backtest(df, rr=2.0, sl_atr=1.5):
         signal, _, _ = get_signal(row)
 
         if (
-            signal not in ("BUY", "SELL")
+            signal not in ["BUY", "SELL"]
             or pd.isna(row["ATR"])
             or row["ATR"] <= 0
         ):
             continue
 
-        entry = float(nxt["open"])
-        risk = float(row["ATR"] * sl_atr)
+        entry = float(next_row["open"])
+        distance = float(row["ATR"]) * 1.5
 
         if signal == "BUY":
             position = {
                 "side": "BUY",
                 "entry": entry,
-                "sl": entry - risk,
-                "tp": entry + risk * rr,
-                "time": nxt["datetime"],
+                "sl": entry - distance,
+                "tp": entry + distance * reward,
+                "time": next_row["datetime"],
             }
-
         else:
             position = {
                 "side": "SELL",
                 "entry": entry,
-                "sl": entry + risk,
-                "tp": entry - risk * rr,
-                "time": nxt["datetime"],
+                "sl": entry + distance,
+                "tp": entry - distance * reward,
+                "time": next_row["datetime"],
             }
 
-    result = pd.DataFrame(trades)
-
-    if position is not None:
-        result.attrs["open_trade_note"] = (
-            "An open simulated trade remained at the end "
-            "and is excluded from closed-trade statistics."
-        )
-
-    return result
+    return pd.DataFrame(trades)
 
 
 try:
-    with st.spinner(
-        f"Loading {symbol} {timeframe_label} candles..."
-    ):
-        raw_df, metadata = fetch_candles(
-            api_key,
-            symbol,
-            interval,
-            outputsize
+    with st.spinner("Loading market data..."):
+        raw, metadata = fetch_candles(
+            api_key, symbol, interval, candle_count
         )
 
-    df = add_indicators(raw_df)
+    df = add_indicators(raw)
 
-except Exception as exc:
-    st.error(f"Could not load {symbol} data: {exc}")
-
+except Exception as error:
+    st.error(f"Market data error: {error}")
     st.info(
-        "This pair or timeframe may not be supported by your "
-        "Twelve Data plan, or API credits may be exhausted. "
-        "Check the provider dashboard before enabling "
-        "multi-timeframe requests."
+        "Check the selected pair, timeframe and remaining "
+        "Twelve Data API credits."
     )
-
     st.stop()
 
 
-if len(df) < 30:
-    st.warning(
-        "The provider returned fewer than 30 candles. "
-        "Some indicators and signals may be unreliable."
-    )
-
+if df.empty:
+    st.error("No valid candle data returned.")
+    st.stop()
 
 last = df.iloc[-1]
-
 signal, quality, reason = get_signal(last)
 
-entry, sl, targets = make_trade_levels(
-    last,
-    signal,
-    [rr1, rr2, rr3]
+entry, sl, targets = trade_levels(
+    last, signal, [rr1, rr2, rr3]
 )
-
-risk_cash = account_balance * risk_pct / 100
 
 support = float(df["low"].tail(50).min())
 resistance = float(df["high"].tail(50).max())
+risk_cash = balance * risk_percent / 100
 
-atr_median = df["ATR"].tail(100).median()
+if pd.isna(last["ATR"]):
+    volatility = "Unavailable"
+else:
+    median_atr = df["ATR"].tail(100).median()
 
-if (
-    pd.notna(last["ATR"])
-    and pd.notna(atr_median)
-    and atr_median > 0
-):
-    if last["ATR"] > atr_median * 1.5:
+    if pd.isna(median_atr) or median_atr <= 0:
+        volatility = "Unavailable"
+    elif last["ATR"] > median_atr * 1.5:
         volatility = "High"
-    elif last["ATR"] < atr_median * 0.7:
+    elif last["ATR"] < median_atr * 0.7:
         volatility = "Low"
     else:
         volatility = "Normal"
-else:
-    volatility = "Unavailable"
 
-
-if (
-    last["EMA20"] > last["EMA50"] > last["EMA200"]
-):
+if last["EMA20"] > last["EMA50"] > last["EMA200"]:
     trend = "Bullish"
-elif (
-    last["EMA20"] < last["EMA50"] < last["EMA200"]
-):
+elif last["EMA20"] < last["EMA50"] < last["EMA200"]:
     trend = "Bearish"
 else:
     trend = "Sideways / Mixed"
 
-
 st.caption(
-    f"Selected market: **{symbol}** · "
-    f"Timeframe: **{timeframe_label}** · "
-    f"Latest returned candle: {last['datetime']}"
+    f"Market: {symbol} | Timeframe: {tf_name} | "
+    f"Latest candle: {last['datetime']}"
 )
 
-a, b, c, d = st.columns(4)
-
-a.metric("Latest Price", f"{last['close']:.5f}")
-b.metric("Signal", signal, f"Quality score: {quality}/100")
-c.metric("Trend", trend)
-d.metric("Volatility", volatility)
-
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Latest Price", f"{last['close']:.5f}")
+c2.metric("Signal", signal, f"Quality: {quality}/100")
+c3.metric("Trend", trend)
+c4.metric("Volatility", volatility)
 
 st.subheader("Trade Setup")
 
-t1, t2, t3, t4, t5 = st.columns(5)
+p1, p2, p3, p4, p5 = st.columns(5)
+p1.metric("Entry Reference", f"{entry:.5f}")
+p2.metric("Stop Loss", f"{sl:.5f}" if pd.notna(sl) else "N/A")
+p3.metric("TP1", f"{targets[0]:.5f}" if pd.notna(targets[0]) else "N/A")
+p4.metric("TP2", f"{targets[1]:.5f}" if pd.notna(targets[1]) else "N/A")
+p5.metric("TP3", f"{targets[2]:.5f}" if pd.notna(targets[2]) else "N/A")
 
-t1.metric("Entry Reference", f"{entry:.5f}")
-
-t2.metric(
-    "Stop Loss",
-    f"{sl:.5f}" if pd.notna(sl) else "N/A"
-)
-
-t3.metric(
-    "TP1",
-    f"{targets[0]:.5f}" if pd.notna(targets[0]) else "N/A"
-)
-
-t4.metric(
-    "TP2",
-    f"{targets[1]:.5f}" if pd.notna(targets[1]) else "N/A"
-)
-
-t5.metric(
-    "TP3",
-    f"{targets[2]:.5f}" if pd.notna(targets[2]) else "N/A"
-)
-
-st.write(
-    f"**Signal reasoning:** {reason}. "
-    f"**Support proxy:** {support:.5f} · "
-    f"**Resistance proxy:** {resistance:.5f}"
-)
+st.write(f"**Reason:** {reason}")
+st.write(f"**Support estimate:** {support:.5f}")
+st.write(f"**Resistance estimate:** {resistance:.5f}")
 
 st.caption(
-    "Entry is the latest returned candle close for reference only, "
-    "not a live execution price. SL/TP are ATR-based estimates."
+    "Entry is the latest candle close for reference, not a live "
+    "execution price. SL/TP are ATR-based estimates."
 )
-
 
 tabs = st.tabs([
     "Chart & Indicators",
     "Price Action",
     "Risk Calculator",
     "Backtest",
-    "Journal & Status"
+    "Journal & Status",
 ])
 
-
 with tabs[0]:
-    chart = go.Figure(
-        data=[
-            go.Candlestick(
-                x=df["datetime"],
-                open=df["open"],
-                high=df["high"],
-                low=df["low"],
-                close=df["close"],
-                name=symbol
-            )
-        ]
-    )
-
-    chart.add_trace(
-        go.Scatter(
+    chart = go.Figure(data=[
+        go.Candlestick(
             x=df["datetime"],
-            y=df["EMA20"],
-            name="EMA 20",
-            line={"width": 1}
+            open=df["open"],
+            high=df["high"],
+            low=df["low"],
+            close=df["close"],
+            name=symbol,
         )
-    )
+    ])
 
-    chart.add_trace(
-        go.Scatter(
+    for column in ["EMA20", "EMA50", "EMA200"]:
+        chart.add_trace(go.Scatter(
             x=df["datetime"],
-            y=df["EMA50"],
-            name="EMA 50",
-            line={"width": 1}
-        )
-    )
+            y=df[column],
+            name=column,
+        ))
 
-    chart.add_trace(
-        go.Scatter(
-            x=df["datetime"],
-            y=df["EMA200"],
-            name="EMA 200",
-            line={"width": 1}
-        )
-    )
+    chart.add_trace(go.Scatter(
+        x=df["datetime"],
+        y=df["BB_Upper"],
+        name="Bollinger Upper",
+    ))
 
-    chart.add_trace(
-        go.Scatter(
-            x=df["datetime"],
-            y=df["BB_upper"],
-            name="BB Upper",
-            line={"width": 1, "dash": "dot"}
-        )
-    )
-
-    chart.add_trace(
-        go.Scatter(
-            x=df["datetime"],
-            y=df["BB_lower"],
-            name="BB Lower",
-            line={"width": 1, "dash": "dot"}
-        )
-    )
+    chart.add_trace(go.Scatter(
+        x=df["datetime"],
+        y=df["BB_Lower"],
+        name="Bollinger Lower",
+    ))
 
     chart.update_layout(
+        title=f"{symbol} - {tf_name}",
         height=600,
         xaxis_rangeslider_visible=False,
-        title=f"{symbol} · {timeframe_label}",
-        margin={"l": 10, "r": 10, "t": 45, "b": 10}
     )
 
-    st.plotly_chart(
-        chart,
-        use_container_width=True
-    )
+    st.plotly_chart(chart, use_container_width=True)
 
-    i1, i2, i3, i4 = st.columns(4)
-
-    i1.metric(
-        "RSI (14)",
-        f"{last['RSI']:.2f}" if pd.notna(last["RSI"]) else "N/A"
-    )
-
-    i2.metric(
-        "ADX (14)",
-        f"{last['ADX']:.2f}" if pd.notna(last["ADX"]) else "N/A"
-    )
-
-    i3.metric(
-        "MACD",
-        f"{last['MACD']:.5f}" if pd.notna(last["MACD"]) else "N/A"
-    )
-
-    i4.metric(
-        "ATR (14)",
-        f"{last['ATR']:.5f}" if pd.notna(last["ATR"]) else "N/A"
-    )
-
-    if pd.notna(last["BB_mid"]):
-        st.write(
-            f"**Bollinger Bands:** "
-            f"Lower {last['BB_lower']:.5f} · "
-            f"Middle {last['BB_mid']:.5f} · "
-            f"Upper {last['BB_upper']:.5f}"
-        )
-    else:
-        st.write("Bollinger Bands are warming up.")
-
+    a, b, c, d = st.columns(4)
+    a.metric("RSI", f"{last['RSI']:.2f}" if pd.notna(last["RSI"]) else "N/A")
+    b.metric("ADX", f"{last['ADX']:.2f}" if pd.notna(last["ADX"]) else "N/A")
+    c.metric("MACD", f"{last['MACD']:.5f}" if pd.notna(last["MACD"]) else "N/A")
+    d.metric("ATR", f"{last['ATR']:.5f}" if pd.notna(last["ATR"]) else "N/A")
 
 with tabs[1]:
-    st.markdown("### Candle Patterns")
+    st.subheader("Candle Patterns")
 
-    for item in pattern_labels(df):
-        st.write(f"• {item}")
+    for pattern in detect_patterns(df):
+        st.write(f"- {pattern}")
 
-    st.markdown("### Market Structure Proxies")
+    recent_high = df["high"].iloc[-21:-1].max() if len(df) >= 22 else df["high"].max()
+    recent_low = df["low"].iloc[-21:-1].min() if len(df) >= 22 else df["low"].min()
 
-    recent_high = (
-        df["high"].iloc[-21:-1].max()
-        if len(df) >= 22
-        else df["high"].max()
-    )
-
-    recent_low = (
-        df["low"].iloc[-21:-1].min()
-        if len(df) >= 22
-        else df["low"].min()
-    )
-
-    current = df.iloc[-1]
-
-    if current["close"] > recent_high:
-        st.success(
-            "Possible bullish break of recent range (BOS proxy)."
-        )
-
-    elif current["close"] < recent_low:
-        st.warning(
-            "Possible bearish break of recent range (BOS proxy)."
-        )
-
+    if last["close"] > recent_high:
+        st.success("Possible bullish range breakout.")
+    elif last["close"] < recent_low:
+        st.warning("Possible bearish range breakout.")
     else:
-        st.info(
-            "No close beyond the recent 20-candle range. "
-            "No BOS proxy detected."
-        )
+        st.info("No recent range breakout detected.")
 
-    if (
-        current["high"] > recent_high
-        and current["close"] < recent_high
+    st.write(f"Recent range high: {recent_high:.5f}")
+    st.write(f"Recent range low: {recent_low:.5f}")
+
+    if signal == "WAIT" or (
+        pd.notna(last["ADX"]) and last["ADX"] < 15
     ):
-        st.warning("Possible buy-side liquidity sweep proxy.")
-
-    if (
-        current["low"] < recent_low
-        and current["close"] > recent_low
-    ):
-        st.warning("Possible sell-side liquidity sweep proxy.")
-
-    st.write(
-        f"**Recent range low:** {recent_low:.5f} · "
-        f"**Recent range high:** {recent_high:.5f}"
-    )
+        st.warning("Possible no-trade condition: mixed or weak trend.")
+    else:
+        st.info("The basic filter did not flag a weak-trend condition.")
 
     st.caption(
-        "BOS, liquidity sweep, order block and FVG require rule "
-        "definitions. This version only shows basic range-break "
-        "and sweep proxies. It does not claim institutional "
-        "order-flow data."
+        "Breakout is a simple price-range check. This version does "
+        "not identify real order flow or confirmed institutional "
+        "order blocks."
     )
 
-    st.markdown("### No-Trade Filter")
-
-    if (
-        signal == "WAIT"
-        or (
-            pd.notna(last["ADX"])
-            and last["ADX"] < 15
-        )
-    ):
-        st.warning(
-            "Conditions are mixed or trend strength is weak. "
-            "Consider waiting."
-        )
-    else:
-        st.info(
-            "The rule-based filter did not flag a weak-trend "
-            "no-trade condition. This is not a guarantee."
-        )
-
-
 with tabs[2]:
-    st.markdown("### Risk Budget")
+    st.subheader("Risk Calculator")
 
     r1, r2, r3 = st.columns(3)
-
     r1.metric("Risk Amount", f"${risk_cash:.2f}")
-    r2.metric("Risk Percentage", f"{risk_pct:.2f}%")
-    r3.metric("Risk-to-Reward", f"1:{rr2:g} (TP2)")
-
-    st.markdown("### Lot Size")
+    r2.metric("Risk Percentage", f"{risk_percent:.2f}%")
+    r3.metric("TP2 Reward/Risk", f"1:{rr2:g}")
 
     st.warning(
-        "Lot size is not auto-calculated because contract size, "
-        "tick value, account currency conversion and broker "
-        "symbol specifications must be verified for each instrument."
+        "Automatic lot size is not calculated because contract size, "
+        "tick value and broker specifications must be verified."
     )
 
     st.write(
-        "For a reliable lot-size calculator, use the exact "
-        "contract and tick specifications shown in your Exness "
-        "MT5 symbol details.
+        "For Exness, check the exact symbol specifications in MT5 "
+        "before calculating lot size."
+    )
+
+with tabs[3]:
+    st.subheader("Historical Backtest")
+
+    reward = st.selectbox(
+        "Take Profit Risk/Reward",
+        [1.0, 1.5, 2.0, 3.0],
+        index=2,
+    )
+
+    bt = run_backtest(df, reward)
+
+    if bt.empty:
+        st.info(
+            "No closed trades found in the loaded candles. "
+            "Try loading more candles or another timeframe."
+        )
+    else:
+        wins = int((bt["R Result"] > 0).sum())
+        gross_profit = bt.loc[bt["R Result"] > 0, "R Result"].sum()
+        gross_loss = abs(bt.loc[bt["R Result"] < 0, "R Result"].sum())
+
+        profit_factor = (
+            gross_profit / gross_loss
+            if gross_loss > 0
+            else np.nan
+        )
+
+        equity = bt["R Result"].cumsum()
+        drawdown = (equity.cummax() - equity).max()
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Closed Trades", str(len(bt)))
+        m2.metric("Win Rate", f"{wins / len(bt) * 100:.1f}%")
+        m3.metric(
+            "Profit Factor",
+            f"{profit_factor:.2f}" if pd.notna(profit_factor) else "N/A"
+        )
+        m4.metric("Max Drawdown", f"{drawdown:.2f}R")
+
+        st.metric("Net Result", f"{bt['R Result'].sum():.2f}R")
+        st.dataframe(bt.tail(100), use_container_width=True)
+
+        st.download_button(
+            "Download Backtest CSV",
+            bt.to_csv(index=False).encode("utf-8"),
+            file_name="forex_backtest.csv",
+            mime="text/csv",
+        )
+
+    st.caption(
+        "This simplified backtest excludes spread, slippage and "
+        "commission. If SL and TP are touched in one candle, SL "
+        "is counted first. Results are not guaranteed to match "
+        "live trading."
+    )
+
+with tabs[4]:
+    st.subheader("Trade Journal")
+
+    st.caption(
+        "Journal entries are stored in the current Streamlit session, "
+        "not in a permanent database."
+    )
+
+    with st.form("journal_form"):
+        j_market = st.text_input("Market", value=symbol)
+        j_side = st.selectbox("Side", ["BUY", "SELL"])
+        j_entry = st.number_input(
+            "Entry Price", min_value=0.0, value=float(last["close"])
+        )
+        j_exit = st.number_input(
+            "Exit Price", min_value=0.0, value=float(last["close"])
+        )
+        j_pl = st.number_input("Profit/Loss USD", value=0.0)
+        j_notes = st.text_input("Notes")
+        submitted = st.form_submit_button("Add Journal Entry")
+
+    if "journal_rows" not in st.session_state:
+        st.session_state.journal_rows = []
+
+    if submitted:
+        st.session_state.journal_rows.append({
+            "Time UTC": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            "Market": j_market,
+            "Side": j_side,
+            "Entry": j_entry,
+            "Exit": j_exit,
+            "P/L USD": j_pl,
+            "Notes": j_notes,
+        })
+
+    if st.session_state.journal_rows:
+        journal = pd.DataFrame(st.session_state.journal_rows)
+
+        st.dataframe(journal, use_container_width=True)
+        st.metric("Journal Net P/L", f"${journal['P/L USD'].sum():.2f}")
+
+        st.download_button(
+            "Download Journal CSV",
+            journal.to_csv(index=False).encode("utf-8"),
+            file_name="forex_journal.csv",
+            mime="text/csv",
+        )
+    else:
+        st.info("No journal entries yet.")
+
+    st.subheader("Data & Connection Status")
+
+    st.success(f"Market candle data loaded for {symbol} / {tf_name}.")
+    st.write(f"Provider metadata: {metadata if metadata else 'Not supplied'}")
+
+    st.warning(
+        "This version does not connect live news, live spread, "
+        "push alerts, permanent cloud storage, a real AI model or "
+        "Exness MT5 trade execution."
+    )
+
+    if mtf_enabled:
+        st.subheader("Multi-Timeframe Confirmation")
+        mtf_rows = []
+
+        for label, mtf_interval in TIMEFRAMES.items():
+            try:
+                mtf_raw, _ = fetch_candles(
+                    api_key, symbol, mtf_interval, 120
+                )
+                mtf_df = add_indicators(mtf_raw)
+                mtf_last = mtf_df.iloc[-1]
+                mtf_signal, mtf_score, _ = get_signal(mtf_last)
+
+                mtf_rows.append({
+                    "Timeframe": label,
+      
