@@ -414,6 +414,7 @@ def get_signal(row, df, min_score=6):
         "RSI", "MACD", "MACD_signal", "ADX",
         "ATR", "BB_upper", "BB_lower"
     ]
+
     if any(pd.isna(row.get(c)) for c in required):
         return {
             "signal": "WAIT",
@@ -458,7 +459,6 @@ def get_signal(row, df, min_score=6):
     sell_score = int(sum(sell_checks))
     max_score = len(buy_checks)
 
-    # WAIT is preferred in a choppy market unless the technical setup is unusually strong.
     if regime == "CHOPPY / RANGE" and max(buy_score, sell_score) < 8:
         signal = "WAIT"
     elif buy_score >= min_score and buy_score > sell_score:
@@ -472,6 +472,7 @@ def get_signal(row, df, min_score=6):
     confidence = int(round((score / max_score) * 100))
 
     reasons = []
+
     if row["close"] > row["EMA20"]:
         reasons.append("Price above EMA20")
     elif row["close"] < row["EMA20"]:
@@ -515,7 +516,14 @@ def get_signal(row, df, min_score=6):
 # Smart SL / TP
 # -----------------------------
 def build_trade(row, signal, rr1, rr2, rr3):
-    direction = "BUY" if "BUY" in signal else "SELL" if "SELL" in signal else None
+    direction = (
+        "BUY"
+        if "BUY" in signal
+        else "SELL"
+        if "SELL" in signal
+        else None
+    )
+
     if direction is None or pd.isna(row["ATR"]):
         return None
 
@@ -527,11 +535,18 @@ def build_trade(row, signal, rr1, rr2, rr3):
 
     if direction == "BUY":
         atr_sl = entry - 1.5 * atr
-        swing_sl = recent_low - 0.10 * atr if np.isfinite(recent_low) else atr_sl
+        swing_sl = (
+            recent_low - 0.10 * atr
+            if np.isfinite(recent_low)
+            else atr_sl
+        )
+
         sl = min(atr_sl, swing_sl)
         risk = entry - sl
+
         if risk <= 0:
             return None
+
         return {
             "direction": direction,
             "entry": entry,
@@ -543,9 +558,15 @@ def build_trade(row, signal, rr1, rr2, rr3):
         }
 
     atr_sl = entry + 1.5 * atr
-    swing_sl = recent_high + 0.10 * atr if np.isfinite(recent_high) else atr_sl
+    swing_sl = (
+        recent_high + 0.10 * atr
+        if np.isfinite(recent_high)
+        else atr_sl
+    )
+
     sl = max(atr_sl, swing_sl)
     risk = sl - entry
+
     if risk <= 0:
         return None
 
@@ -560,10 +581,26 @@ def build_trade(row, signal, rr1, rr2, rr3):
     }
 
 
+# -----------------------------
+# Trade levels
+# -----------------------------
 def add_trade_levels(df):
     d = df.copy()
-    d["recent_low"] = d["low"].rolling(6).min().shift(1)
-    d["recent_high"] = d["high"].rolling(6).max().shift(1)
+
+    d["recent_low"] = (
+        d["low"]
+        .rolling(6)
+        .min()
+        .shift(1)
+    )
+
+    d["recent_high"] = (
+        d["high"]
+        .rolling(6)
+        .max()
+        .shift(1)
+    )
+
     return d
 
 
@@ -574,26 +611,49 @@ def backtest(df, min_score=6, rr=2.0):
     trades = []
 
     if len(df) < 100:
-        return pd.DataFrame(), {}
+        return pd.DataFrame(), {
+            "trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_rate": 0.0,
+            "profit_factor": 0.0,
+            "net_r": 0.0,
+            "max_drawdown_r": 0.0,
+        }
 
     for i in range(100, len(df) - 1):
         row = df.iloc[i]
-        result = get_signal(row, df.iloc[: i + 1], min_score=min_score)
 
-        if result["signal"] not in ["BUY", "STRONG BUY", "SELL", "STRONG SELL"]:
+        result = get_signal(
+            row,
+            df.iloc[: i + 1],
+            min_score=min_score,
+        )
+
+        if result["signal"] not in [
+            "BUY",
+            "STRONG BUY",
+            "SELL",
+            "STRONG SELL",
+        ]:
             continue
 
-        trade = build_trade(row, result["signal"], 1.0, rr, rr)
+        trade = build_trade(
+            row,
+            result["signal"],
+            1.0,
+            rr,
+            rr,
+        )
+
         if trade is None:
             continue
 
-        # No look-ahead: entry is next candle open.
         next_bar = df.iloc[i + 1]
         entry = float(next_bar["open"])
         direction = trade["direction"]
-
-        # Rebuild levels from the next-bar entry using the same risk distance.
         risk = trade["risk_distance"]
+
         if direction == "BUY":
             sl = entry - risk
             tp = entry + risk * rr
@@ -615,12 +675,12 @@ def backtest(df, min_score=6, rr=2.0):
                 hit_sl = bar["high"] >= sl
                 hit_tp = bar["low"] <= tp
 
-            # Conservative rule: if both are touched in one candle, count SL first.
             if hit_sl:
                 outcome = "LOSS"
                 exit_price = sl
                 exit_time = bar["datetime"]
                 break
+
             if hit_tp:
                 outcome = "WIN"
                 exit_price = tp
@@ -660,18 +720,13 @@ def backtest(df, min_score=6, rr=2.0):
             "max_drawdown_r": 0.0,
         }
 
-    wins = int((trades_df["result"] == "WIN").sum())
-    losses = int((trades_df["result"] == "LOSS").sum())
-    win_rate = wins / len(trades_df) * 100
+    wins = int(
+        (trades_df["result"] == "WIN").sum()
+    )
 
-    gross_profit = float(trades_df.loc[trades_df["R"] > 0, "R"].sum())
-    gross_loss = abs(float(trades_df.loc[trades_df["R"] < 0, "R"].sum()))
-    profit_factor = gross_profit / gross_loss if gross_loss > 0 else np.inf
+    losses = int(
+        (trades_df["result"] == "LOSS").sum()
+    )
 
-    equity = trades_df["R"].cumsum()
-    peak = equity.cummax()
-    drawdown = equity - peak
-    max_dd = abs(float(drawdown.min())) if len(drawdown) else 0.0
-
-    return trades_df, {
-  
+    win_rate = (
+        wins / len(tr
