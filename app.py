@@ -946,6 +946,420 @@ def backtest_strategy(
 
                 if hit_sl:
                     result = "LOSS"
+                    def add_trade_levels(df):
+    d = df.copy()
+
+    d["recent_low"] = (
+        d["low"]
+        .rolling(6)
+        .min()
+        .shift(1)
+    )
+
+    d["recent_high"] = (
+        d["high"]
+        .rolling(6)
+        .max()
+        .shift(1)
+    )
+
+    d["buy_sl"] = np.minimum(
+        d["close"] - 1.5 * d["ATR"],
+        d["recent_low"] - 0.10 * d["ATR"],
+    )
+
+    d["sell_sl"] = np.maximum(
+        d["close"] + 1.5 * d["ATR"],
+        d["recent_high"] + 0.10 * d["ATR"],
+    )
+
+    return d
+
+
+def market_regime(row):
+    close = float(row["close"])
+    ema20 = float(row["EMA20"])
+    ema50 = float(row["EMA50"])
+    ema200 = float(row["EMA200"])
+    adx = float(row["ADX"])
+    atr = float(row["ATR"])
+
+    atr_ratio = (
+        atr / close
+        if close != 0
+        else 0
+    )
+
+    if (
+        adx >= 25
+        and close > ema20 > ema50 > ema200
+    ):
+        return "STRONG UPTREND"
+
+    if (
+        adx >= 25
+        and close < ema20 < ema50 < ema200
+    ):
+        return "STRONG DOWNTREND"
+
+    if (
+        adx >= 18
+        and close > ema50
+        and ema20 > ema50
+    ):
+        return "UPTREND"
+
+    if (
+        adx >= 18
+        and close < ema50
+        and ema20 < ema50
+    ):
+        return "DOWNTREND"
+
+    if (
+        adx < 15
+        and 0.0075 <= atr_ratio <= 0.0135
+    ):
+        return "CHOPPY / RANGE"
+
+    if atr_ratio >= 0.015:
+        return "HIGH VOLATILITY"
+
+    return "MIXED"
+
+
+def get_signal(row, minimum_score=6):
+    regime = market_regime(row)
+
+    close = float(row["close"])
+    ema20 = float(row["EMA20"])
+    ema50 = float(row["EMA50"])
+    ema200 = float(row["EMA200"])
+    rsi = float(row["RSI"])
+    macd = float(row["MACD"])
+    macd_signal = float(row["MACD_signal"])
+    adx = float(row["ADX"])
+    bb_mid = float(row["BB_mid"])
+    body_ratio = float(row["body_ratio"])
+
+    bullish_candle = (
+        close > float(row["open"])
+        and body_ratio >= 0.25
+    )
+
+    bearish_candle = (
+        close < float(row["open"])
+        and body_ratio >= 0.25
+    )
+
+    buy_checks = {
+        "Price > EMA20": close > ema20,
+        "EMA20 > EMA50": ema20 > ema50,
+        "EMA50 > EMA200": ema50 > ema200,
+        "RSI > 52": rsi > 52,
+        "MACD > Signal": macd > macd_signal,
+        "ADX >= 18": adx >= 18,
+        "Bullish Candle": bullish_candle,
+        "Price > BB Mid": close > bb_mid,
+        "Uptrend Regime": regime in [
+            "UPTREND",
+            "STRONG UPTREND",
+        ],
+    }
+
+    sell_checks = {
+        "Price < EMA20": close < ema20,
+        "EMA20 < EMA50": ema20 < ema50,
+        "EMA50 < EMA200": ema50 < ema200,
+        "RSI < 48": rsi < 48,
+        "MACD < Signal": macd < macd_signal,
+        "ADX >= 18": adx >= 18,
+        "Bearish Candle": bearish_candle,
+        "Price < BB Mid": close < bb_mid,
+        "Downtrend Regime": regime in [
+            "DOWNTREND",
+            "STRONG DOWNTREND",
+        ],
+    }
+
+    buy_score = sum(
+        bool(value)
+        for value in buy_checks.values()
+    )
+
+    sell_score = sum(
+        bool(value)
+        for value in sell_checks.values()
+    )
+
+    max_score = len(buy_checks)
+
+    if regime == "CHOPPY / RANGE":
+        if max(buy_score, sell_score) < 8:
+            signal = "WAIT"
+
+        elif buy_score > sell_score:
+            signal = "BUY"
+
+        elif sell_score > buy_score:
+            signal = "SELL"
+
+        else:
+            signal = "WAIT"
+
+    else:
+        if (
+            buy_score >= minimum_score
+            and buy_score > sell_score
+        ):
+            signal = (
+                "STRONG BUY"
+                if buy_score >= 8
+                else "BUY"
+            )
+
+        elif (
+            sell_score >= minimum_score
+            and sell_score > buy_score
+        ):
+            signal = (
+                "STRONG SELL"
+                if sell_score >= 8
+                else "SELL"
+            )
+
+        else:
+            signal = "WAIT"
+
+    if signal in ["BUY", "STRONG BUY"]:
+        score = buy_score
+
+    elif signal in ["SELL", "STRONG SELL"]:
+        score = sell_score
+
+    else:
+        score = max(
+            buy_score,
+            sell_score,
+        )
+
+    confidence = (
+        score / max_score * 100
+        if max_score
+        else 0
+    )
+
+    return {
+        "signal": signal,
+        "buy_score": buy_score,
+        "sell_score": sell_score,
+        "score": score,
+        "max_score": max_score,
+        "confidence": confidence,
+        "regime": regime,
+        "buy_checks": buy_checks,
+        "sell_checks": sell_checks,
+    }
+
+
+def build_trade(row, signal, rr_values):
+    if signal not in [
+        "BUY",
+        "STRONG BUY",
+        "SELL",
+        "STRONG SELL",
+    ]:
+        return None
+
+    entry = float(row["close"])
+    atr = float(row["ATR"])
+
+    rr1_value, rr2_value, rr3_value = rr_values
+
+    if signal in [
+        "BUY",
+        "STRONG BUY",
+    ]:
+        sl = float(row["buy_sl"])
+
+        risk_distance = entry - sl
+
+        if risk_distance <= 0:
+            risk_distance = 1.5 * atr
+
+        tp1 = entry + risk_distance * rr1_value
+        tp2 = entry + risk_distance * rr2_value
+        tp3 = entry + risk_distance * rr3_value
+
+        direction = "BUY"
+
+    else:
+        sl = float(row["sell_sl"])
+
+        risk_distance = sl - entry
+
+        if risk_distance <= 0:
+            risk_distance = 1.5 * atr
+
+        tp1 = entry - risk_distance * rr1_value
+        tp2 = entry - risk_distance * rr2_value
+        tp3 = entry - risk_distance * rr3_value
+
+        direction = "SELL"
+
+    return {
+        "direction": direction,
+        "entry": entry,
+        "sl": sl,
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
+        "risk_distance": risk_distance,
+    }
+
+
+def backtest_strategy(
+    df,
+    minimum_score,
+    rr,
+):
+    if len(df) < 120:
+        return pd.DataFrame(), {
+            "trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_rate": 0.0,
+            "profit_factor": 0.0,
+            "net_r": 0.0,
+            "max_drawdown_r": 0.0,
+        }
+
+    rows = []
+
+    for i in range(100, len(df) - 1):
+        signal_row = df.iloc[i]
+
+        signal_info = get_signal(
+            signal_row,
+            minimum_score,
+        )
+
+        signal = signal_info["signal"]
+
+        if signal not in [
+            "BUY",
+            "STRONG BUY",
+            "SELL",
+            "STRONG SELL",
+        ]:
+            continue
+
+        entry_row = df.iloc[i + 1]
+
+        entry = float(entry_row["open"])
+        atr = float(signal_row["ATR"])
+
+        if not np.isfinite(entry) or not np.isfinite(atr):
+            continue
+
+        if signal in [
+            "BUY",
+            "STRONG BUY",
+        ]:
+            recent_low = float(
+                signal_row["recent_low"]
+            )
+
+            sl = min(
+                entry - 1.5 * atr,
+                recent_low - 0.10 * atr,
+            )
+
+            risk_distance = entry - sl
+
+            if risk_distance <= 0:
+                continue
+
+            tp = entry + risk_distance * rr
+
+            result = None
+            exit_time = None
+
+            for j in range(
+                i + 1,
+                len(df),
+            ):
+                bar = df.iloc[j]
+
+                bar_low = float(bar["low"])
+                bar_high = float(bar["high"])
+
+                hit_sl = bar_low <= sl
+                hit_tp = bar_high >= tp
+
+                if hit_sl and hit_tp:
+                    result = "LOSS"
+                    exit_time = bar["datetime"]
+                    break
+
+                if hit_sl:
+                    result = "LOSS"
+                    exit_time = bar["datetime"]
+                    break
+
+                if hit_tp:
+                    result = "WIN"
+                    exit_time = bar["datetime"]
+                    break
+
+            if result is None:
+                continue
+
+            r_value = (
+                1.0
+                if result == "WIN"
+                else -1.0
+            )
+
+        else:
+            recent_high = float(
+                signal_row["recent_high"]
+            )
+
+            sl = max(
+                entry + 1.5 * atr,
+                recent_high + 0.10 * atr,
+            )
+
+            risk_distance = sl - entry
+
+            if risk_distance <= 0:
+                continue
+
+            tp = entry - risk_distance * rr
+
+            result = None
+            exit_time = None
+
+            for j in range(
+                i + 1,
+                len(df),
+            ):
+                bar = df.iloc[j]
+
+                bar_low = float(bar["low"])
+                bar_high = float(bar["high"])
+
+                hit_sl = bar_high >= sl
+                hit_tp = bar_low <= tp
+
+                if hit_sl and hit_tp:
+                    result = "LOSS"
+                    exit_time = bar["datetime"]
+                    break
+
+                if hit_sl:
+                    result = "LOSS"
                     exit_time = bar["datetime"]
                     break
 
@@ -1302,7 +1716,8 @@ elif (
 ):
     final_signal = "WAIT"
 
-    trade = None# =========================
+    trade = None
+    # =========================
 # MAIN DASHBOARD
 # =========================
 
@@ -1786,4 +2201,5 @@ st.caption(
 st.caption(
     f"Last dashboard update: "
     f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
-        )
+)
+           
