@@ -43,7 +43,7 @@ INTERVALS = {
     "5M": "5min",
 }
 
-MTF_INTERVALS = ["1h", "15min"]
+MTF_INTERVALS = ["1h", "15min", "10min", "5min"]
 
 st.title("📊 AI Forex Market Analysis V2")
 st.caption(
@@ -120,14 +120,6 @@ with st.sidebar:
     if st.button("🔄 Refresh market data", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
-
-# Show the active market/pair clearly at the top of the main dashboard.
-st.markdown(
-    f"## 💱 {selected_name}  ",
-)
-st.caption(
-    f"Active pair/currency: **{symbol}**  •  Timeframe: **{timeframe_label}**"
-)
 
 api_key = st.secrets.get("TWELVE_DATA_API_KEY", "")
 if not api_key:
@@ -579,56 +571,37 @@ def add_trade_levels(df):
 # Backtest
 # -----------------------------
 def backtest(df, min_score=6, rr=2.0):
-    """Non-overlapping historical test.
-
-    A new trade is opened on the next candle and no new signal is
-    counted until the current trade reaches SL or TP.
-    """
+    """Walk-forward backtest with no overlapping trades and no look-ahead."""
     trades = []
-
-    if len(df) < 120:
-        return pd.DataFrame(), {}
+    if len(df) < 100:
+        return pd.DataFrame(), {
+            "trades": 0, "wins": 0, "losses": 0, "win_rate": 0.0,
+            "profit_factor": 0.0, "net_r": 0.0, "max_drawdown_r": 0.0,
+        }
 
     i = 100
-
+    last_exit_index = 99
     while i < len(df) - 1:
+        if i <= last_exit_index:
+            i += 1
+            continue
+
         row = df.iloc[i]
-
-        result = get_signal(
-            row,
-            df.iloc[: i + 1],
-            min_score=min_score,
-        )
-
-        if result["signal"] not in [
-            "BUY",
-            "STRONG BUY",
-            "SELL",
-            "STRONG SELL",
-        ]:
+        result = get_signal(row, df.iloc[: i + 1], min_score=min_score)
+        if result["signal"] not in ["BUY", "STRONG BUY", "SELL", "STRONG SELL"]:
             i += 1
             continue
 
-        trade = build_trade(
-            row,
-            result["signal"],
-            1.0,
-            rr,
-            rr,
-        )
-
-        if trade is None:
+        setup = build_trade(row, result["signal"], 1.0, rr, rr)
+        if setup is None:
             i += 1
             continue
 
-        entry_index = i + 1
-        next_bar = df.iloc[entry_index]
+        next_bar = df.iloc[i + 1]
         entry = float(next_bar["open"])
-        direction = trade["direction"]
-
-        risk = float(trade["risk_distance"])
-
-        if not np.isfinite(risk) or risk <= 0:
+        direction = setup["direction"]
+        risk = float(setup["risk_distance"])
+        if risk <= 0 or not np.isfinite(risk):
             i += 1
             continue
 
@@ -644,9 +617,8 @@ def backtest(df, min_score=6, rr=2.0):
         exit_time = None
         exit_index = None
 
-        for j in range(entry_index, len(df)):
+        for j in range(i + 1, len(df)):
             bar = df.iloc[j]
-
             if direction == "BUY":
                 hit_sl = float(bar["low"]) <= sl
                 hit_tp = float(bar["high"]) >= tp
@@ -654,96 +626,52 @@ def backtest(df, min_score=6, rr=2.0):
                 hit_sl = float(bar["high"]) >= sl
                 hit_tp = float(bar["low"]) <= tp
 
+            # Conservative: if both levels are touched in one candle, SL wins.
             if hit_sl:
-                outcome = "LOSS"
-                exit_price = sl
+                outcome, exit_price, exit_index = "LOSS", sl, j
                 exit_time = bar["datetime"]
-                exit_index = j
                 break
-
             if hit_tp:
-                outcome = "WIN"
-                exit_price = tp
+                outcome, exit_price, exit_index = "WIN", tp, j
                 exit_time = bar["datetime"]
-                exit_index = j
                 break
 
         if outcome is None:
             break
 
-        r_value = 1.0 if outcome == "WIN" else -1.0
+        trades.append({
+            "time": next_bar["datetime"],
+            "direction": direction,
+            "entry": entry,
+            "SL": sl,
+            "TP": tp,
+            "result": outcome,
+            "R": 1.0 if outcome == "WIN" else -1.0,
+            "exit_time": exit_time,
+            "score": result["score"],
+            "regime": result["regime"],
+        })
 
-        trades.append(
-            {
-                "time": next_bar["datetime"],
-                "direction": direction,
-                "entry": entry,
-                "SL": sl,
-                "TP": tp,
-                "exit": exit_price,
-                "exit_time": exit_time,
-                "result": outcome,
-                "R": r_value,
-                "score": result["score"],
-                "confidence": result["confidence"],
-            }
-        )
-
-        i = max(entry_index + 1, exit_index + 1)
+        # Do not allow a new signal while this trade is still open.
+        last_exit_index = int(exit_index)
+        i = last_exit_index + 1
 
     trades_df = pd.DataFrame(trades)
-
     if trades_df.empty:
         return trades_df, {
-            "trades": 0,
-            "wins": 0,
-            "losses": 0,
-            "win_rate": 0.0,
-            "profit_factor": 0.0,
-            "net_r": 0.0,
-            "max_drawdown_r": 0.0,
+            "trades": 0, "wins": 0, "losses": 0, "win_rate": 0.0,
+            "profit_factor": 0.0, "net_r": 0.0, "max_drawdown_r": 0.0,
         }
 
-    wins = int(
-        (trades_df["result"] == "WIN").sum()
-    )
-    losses = int(
-        (trades_df["result"] == "LOSS").sum()
-    )
-
-    win_rate = wins / len(trades_df) * 100
-
-    gross_profit = float(
-        trades_df.loc[
-            trades_df["R"] > 0,
-            "R",
-        ].sum()
-    )
-
-    gross_loss = abs(
-        float(
-            trades_df.loc[
-                trades_df["R"] < 0,
-                "R",
-            ].sum()
-        )
-    )
-
-    profit_factor = (
-        gross_profit / gross_loss
-        if gross_loss > 0
-        else np.inf
-    )
-
+    wins = int(trades_df["result"].eq("WIN").sum())
+    losses = int(trades_df["result"].eq("LOSS").sum())
+    win_rate = wins / len(trades_df) * 100.0
+    gross_profit = float(trades_df.loc[trades_df["R"] > 0, "R"].sum())
+    gross_loss = abs(float(trades_df.loc[trades_df["R"] < 0, "R"].sum()))
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else np.inf
     equity = trades_df["R"].cumsum()
-    peak = equity.cummax()
-    drawdown = equity - peak
-
-    max_dd = (
-        abs(float(drawdown.min()))
-        if len(drawdown)
-        else 0.0
-    )
+    drawdown = equity - equity.cummax()
+    max_dd = abs(float(drawdown.min())) if len(drawdown) else 0.0
 
     return trades_df, {
         "trades": len(trades_df),
@@ -754,6 +682,33 @@ def backtest(df, min_score=6, rr=2.0):
         "net_r": float(trades_df["R"].sum()),
         "max_drawdown_r": max_dd,
     }
+
+
+def direction_stats(trades_df):
+    """Return BUY/SELL performance without raising a NameError on empty/partial data."""
+    columns = ["Direction", "Trades", "Wins", "Losses", "Accuracy %", "Net R"]
+    if trades_df is None or trades_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    required = {"direction", "result", "R"}
+    if not required.issubset(trades_df.columns):
+        return pd.DataFrame(columns=columns)
+
+    rows = []
+    for direction in ("BUY", "SELL"):
+        part = trades_df.loc[trades_df["direction"].astype(str).eq(direction)]
+        total = int(len(part))
+        wins = int(part["result"].astype(str).eq("WIN").sum()) if total else 0
+        losses = int(part["result"].astype(str).eq("LOSS").sum()) if total else 0
+        rows.append({
+            "Direction": direction,
+            "Trades": total,
+            "Wins": wins,
+            "Losses": losses,
+            "Accuracy %": round((wins / total) * 100, 2) if total else 0.0,
+            "Net R": round(float(pd.to_numeric(part["R"], errors="coerce").fillna(0).sum()), 2) if total else 0.0,
+        })
+    return pd.DataFrame(rows, columns=columns)
 
 
 # -----------------------------
@@ -984,13 +939,15 @@ with right:
     )
     m4.metric("Net R", f"{bt_stats['net_r']:.2f}")
 
-    st.write(
-        f"Max drawdown: **{bt_stats['max_drawdown_r']:.2f}R**"
-    )
+    st.write(f"Max drawdown: **{bt_stats['max_drawdown_r']:.2f}R**")
+    if bt_stats["trades"] == 0:
+        st.info("No completed historical trades under the current filters; accuracy is not available.")
 
     if not bt_trades.empty:
         stats_df = direction_stats(bt_trades)
         st.dataframe(stats_df, use_container_width=True, hide_index=True)
+        if len(bt_trades) < 20:
+            st.info(f"⚠️ Historical sample is only {len(bt_trades)} completed trades. Win rate is not reliable until more trades are available.")
 
 # -----------------------------
 # MTF table
