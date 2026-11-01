@@ -673,5 +673,13 @@ def backtest(df, min_score=6, rr=2.0):
     drawdown = equity - peak
     max_dd = abs(float(drawdown.min())) if len(drawdown) else 0.0
 
-    return trades_df, {
+        return trades_df, {
+        "trades": len(trades_df),
+        "wins": wins,
+        "losses": losses,
+        "win_rate": win_rate,
+        "profit_factor": profit_factor,
+        "net_r": float(trades_df["R"].sum()),
+        "max_drawdown_r": max_dd,
+    }
   
