@@ -532,7 +532,7 @@ def add_indicators(df):
         d["low"]
     )
 
-    return ddef add_trade_levels(df):
+  def add_trade_levels(df):
     d = df.copy()
 
     d["recent_low"] = (
