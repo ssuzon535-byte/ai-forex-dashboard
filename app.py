@@ -279,9 +279,16 @@ def signal_row(row):
         quality = min(quality, 69)
 
     return direction, label, quality
-    def current_analysis(frames):
+    ```python
+def current_analysis(frames):
     latest = {}
-    biases, scores = {}, {}
+
+    for tf, df in frames.items():
+        if df is not None and not df.empty:
+            latest[tf] = df.iloc[-1]
+
+    return latest
+```
 
     for name, df in frames.items():
         usable = df.iloc[:-1] if len(df) > 2 else df
