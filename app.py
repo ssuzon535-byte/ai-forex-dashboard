@@ -847,6 +847,7 @@ with tabs[4]:
         )
 
         st.download_button(
-            "Download Journal CSV",
-            journal.to_csv(index=False).encode("utf-8"),
-            file_name="forex_journal.csv",
+    "Download Journal CSV",
+    journal.to_csv(index=False).encode("utf-8"),
+    file_name="forex_journal.csv",
+        )
