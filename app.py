@@ -673,5 +673,5 @@ def backtest(df, min_score=6, rr=2.0):
     drawdown = equity - peak
     max_dd = abs(float(drawdown.min())) if len(drawdown) else 0.0
 
-    stats = dict(
-        
+    return trades_df, {
+  
