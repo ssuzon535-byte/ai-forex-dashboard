@@ -296,12 +296,16 @@ def fetch_candles(api_key, symbol, interval, outputsize):
     request_interval = "5min" if interval == "10min" else interval
     request_outputsize = min(int(outputsize) * 2, 5000) if interval == "10min" else int(outputsize)
 
+    # Request timestamps in Bangladesh local time explicitly. This makes naive
+    # provider timestamps interpretable and keeps the dashboard display consistent.
+    requested_timezone = "Asia/Dhaka"
     response = requests.get(
         url,
         params={
             "symbol": symbol,
             "interval": request_interval,
             "outputsize": request_outputsize,
+            "timezone": requested_timezone,
             "apikey": api_key,
             "format": "JSON",
         },
@@ -325,22 +329,25 @@ def fetch_candles(api_key, symbol, interval, outputsize):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Twelve Data timestamps may be returned in the exchange timezone without an
-    # explicit UTC offset. Localize those timestamps using response meta timezone
-    # when available, then convert to UTC so stale/future checks are comparable.
+    # The request explicitly asks Twelve Data for Asia/Dhaka timestamps.
+    # If the provider returns naive timestamps, localize them to that requested
+    # timezone, then convert to UTC internally for reliable age checks/resampling.
     meta = data.get("meta", {}) or {}
     raw_times = pd.to_datetime(df["datetime"], errors="coerce")
     if getattr(raw_times.dt, "tz", None) is None:
-        provider_tz = meta.get("timezone") or meta.get("exchange_timezone")
-        if provider_tz:
-            try:
-                raw_times = raw_times.dt.tz_localize(
-                    provider_tz, ambiguous="NaT", nonexistent="shift_forward"
-                )
-            except (TypeError, ValueError):
-                # Unknown/malformed timezone: leave timestamps naive and flag
-                # validation uncertainty in the UI rather than crashing data load.
-                pass
+        provider_tz = (
+            meta.get("timezone")
+            or meta.get("exchange_timezone")
+            or requested_timezone
+        )
+        try:
+            raw_times = raw_times.dt.tz_localize(
+                provider_tz, ambiguous="NaT", nonexistent="shift_forward"
+            )
+        except (TypeError, ValueError):
+            # Preserve uncertainty instead of guessing UTC if timezone metadata
+            # and the explicitly requested timezone cannot be interpreted.
+            pass
     if getattr(raw_times.dt, "tz", None) is not None:
         raw_times = raw_times.dt.tz_convert("UTC")
     df["datetime"] = raw_times
@@ -397,7 +404,10 @@ def validate_market_data(df, interval):
     if pd.isna(latest):
         problems.append("Latest candle timestamp cannot be parsed.")
     elif latest.tzinfo is None:
-        problems.append("Timestamps have no timezone. Age check is inconclusive until provider timezone is confirmed.")
+        problems.append(
+            "Timestamps are timezone-naive. The API request asks for Asia/Dhaka, "
+            "but timezone normalization failed; age check is inconclusive."
+        )
     else:
         now = pd.Timestamp.now(tz="UTC")
         age_hours = (now - latest.tz_convert("UTC")).total_seconds() / 3600
@@ -1326,8 +1336,8 @@ st.caption(
 
 
 # ================= STALE DATA WARNING =================
-# Candle timestamps are normalized to UTC in fetch_candles whenever the provider
-# supplies a timezone. For naive timestamps, do not falsely claim they are UTC.
+# Candle timestamps are normalized to UTC in fetch_candles after requesting
+# Asia/Dhaka explicitly. If parsing/localization fails, keep the warning visible.
 try:
     if "df" in locals() and not df.empty and "datetime" in df.columns:
         latest_value = pd.to_datetime(df["datetime"].iloc[-1], errors="coerce")
