@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timezone
 
 st.set_page_config(
-    page_title="AI Forex Market Analysis V2",
+    page_title="AI Forex Market Analysis V7",
     page_icon="📊",
     layout="wide",
 )
@@ -83,7 +83,7 @@ def smart_mtf_intervals(main_interval):
     }
     return mapping.get(main_interval, ["1h"])
 
-st.title("📊 AI Forex Market Analysis V2")
+st.title("📊 AI Forex Market Analysis V7")
 st.caption(
     "Live technical analysis + MTF confirmation + market regime + historical backtest. "
     "Educational tool; not guaranteed financial advice."
@@ -324,6 +324,39 @@ def fetch_candles(api_key, symbol, interval, outputsize):
         raise ValueError("Not enough candles returned by the data provider.")
 
     return df, data.get("meta", {})
+
+
+def validate_market_data(df, interval):
+    """Validate candle chronology/OHLC consistency without making extra API calls."""
+    problems = []
+    if df is None or df.empty:
+        return ["No candle rows received."]
+    required = ["datetime", "open", "high", "low", "close"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        return [f"Missing fields: {', '.join(missing)}"]
+    if df[required].isna().any().any():
+        problems.append("Some candle rows contain missing values.")
+    if df["datetime"].duplicated().any():
+        problems.append("Duplicate candle timestamps detected.")
+    if not df["datetime"].is_monotonic_increasing:
+        problems.append("Candle timestamps are not in chronological order.")
+    bad_ohlc = (df["high"] < df[["open", "close", "low"]].max(axis=1)) | (df["low"] > df[["open", "close", "high"]].min(axis=1))
+    if bad_ohlc.any():
+        problems.append(f"{int(bad_ohlc.sum())} candle(s) have inconsistent OHLC values.")
+    latest = pd.to_datetime(df["datetime"].iloc[-1], errors="coerce")
+    if pd.isna(latest):
+        problems.append("Latest candle timestamp cannot be parsed.")
+    elif latest.tzinfo is None:
+        problems.append("Timestamps have no timezone. Age check is inconclusive until provider timezone is confirmed.")
+    else:
+        now = pd.Timestamp.now(tz="UTC")
+        age_hours = (now - latest.tz_convert("UTC")).total_seconds() / 3600
+        if age_hours < -1:
+            problems.append(f"Latest candle is {abs(age_hours):.1f} hours in the future; check API timezone metadata.")
+        elif age_hours > 72:
+            problems.append(f"Latest candle is stale ({age_hours:.1f} hours old).")
+    return problems
 
 
 # -----------------------------
@@ -768,8 +801,10 @@ def backtest(df, min_score=6, rr=2.0, cost_r=0.05):
     closed = trades_df[trades_df["result"].isin(["WIN", "LOSS"])].copy()
     wins = int((closed["result"] == "WIN").sum())
     losses = int((closed["result"] == "LOSS").sum())
-    gross_profit = float(closed.loc[closed["R"] > 0, "R"].sum()) if not closed.empty else 0.0
-    gross_loss = abs(float(closed.loc[closed["R"] < 0, "R"].sum())) if not closed.empty else 0.0
+    # Profit factor is conventionally calculated from gross winning/losing trades.
+    # Keep estimated costs in Net R, but do not mix them into the gross PF calculation.
+    gross_profit = float(closed.loc[closed["gross_R"] > 0, "gross_R"].sum()) if not closed.empty else 0.0
+    gross_loss = abs(float(closed.loc[closed["gross_R"] < 0, "gross_R"].sum())) if not closed.empty else 0.0
     equity = closed["R"].cumsum() if not closed.empty else pd.Series(dtype=float)
     max_dd = abs(float((equity - equity.cummax()).min())) if len(equity) else 0.0
     return trades_df, {
@@ -878,6 +913,18 @@ except Exception as exc:
     else:
         st.error(f"Market data error: {exc}")
     st.stop()
+
+# API response/data integrity test uses already-loaded cached data (no extra API credits).
+with st.expander("🧪 Twelve Data API / Market Data Validation", expanded=False):
+    st.caption("Checks the candles already loaded by the dashboard. This does not send another API request.")
+    if st.button("Run Market Data Validation", key="validate_loaded_market_data"):
+        _data_issues = validate_market_data(raw_df, interval)
+        if _data_issues:
+            st.error("Market data validation found issues:")
+            for _issue in _data_issues:
+                st.write(f"• {_issue}")
+        else:
+            st.success(f"PASS: {len(raw_df)} candles passed timestamp, ordering and OHLC consistency checks.")
 
 # Use closed candle by default to reduce signal flipping/repainting.
 if signal_mode == "Closed candle (stable)" and len(df) >= 2:
@@ -1055,7 +1102,8 @@ with left:
     st.table(pd.DataFrame(list(factors.items()), columns=["Factor", "Status"]))
 
 with right:
-    st.subheader("📈 Historical Accuracy")
+    st.subheader("📈 Historical Backtest")
+    st.caption("Win rate is the percentage of closed trades that won in this loaded sample. Technical score is not a win-probability estimate.")
     with st.spinner("Running historical backtest..."):
         bt_trades, bt_stats = backtest(
             df,
@@ -1088,6 +1136,35 @@ with right:
             st.warning(f"⚠️ Only {bt_stats['trades']} closed trades. Accuracy is not statistically reliable yet; aim for at least 20–30 trades before judging the strategy.")
         else:
             st.success("Backtest sample size is large enough for a more useful first-pass comparison (still not a guarantee of future performance).")
+
+    with st.expander("🧪 Dashboard Signal Accuracy Test", expanded=False):
+        st.caption("Reuses the current historical candles and backtest results. No extra Twelve Data API request is made.")
+        if st.button("Run Signal Accuracy Test", key="run_signal_accuracy_test"):
+            if bt_trades.empty:
+                st.warning("No historical trades were generated. Try more candles or a less strict minimum score.")
+            else:
+                _closed_test = bt_trades[bt_trades["result"].isin(["WIN", "LOSS"])].copy()
+                _total_test = len(_closed_test)
+                _wins_test = int((_closed_test["result"] == "WIN").sum())
+                _losses_test = int((_closed_test["result"] == "LOSS").sum())
+                _overall_test = (_wins_test / _total_test * 100) if _total_test else 0.0
+                _buy_test = _closed_test[_closed_test["direction"] == "BUY"]
+                _sell_test = _closed_test[_closed_test["direction"] == "SELL"]
+                _m1, _m2, _m3, _m4 = st.columns(4)
+                _m1.metric("Closed trades", _total_test)
+                _m2.metric("Wins / Losses", f"{_wins_test} / {_losses_test}")
+                _m3.metric("Overall win rate", f"{_overall_test:.1f}%")
+                _m4.metric("Net R", f"{_closed_test['R'].sum():.2f}R" if _total_test else "0.00R")
+                _buy_n = len(_buy_test)
+                _sell_n = len(_sell_test)
+                _performance = pd.DataFrame([
+                    {"Direction": "BUY", "Closed trades": _buy_n, "Wins": int((_buy_test["result"] == "WIN").sum()), "Losses": int((_buy_test["result"] == "LOSS").sum()), "Win rate": f"{((_buy_test['result'] == 'WIN').sum() / _buy_n * 100) if _buy_n else 0:.1f}%"},
+                    {"Direction": "SELL", "Closed trades": _sell_n, "Wins": int((_sell_test["result"] == "WIN").sum()), "Losses": int((_sell_test["result"] == "LOSS").sum()), "Win rate": f"{((_sell_test['result'] == 'WIN').sum() / _sell_n * 100) if _sell_n else 0:.1f}%"},
+                ])
+                st.dataframe(_performance, use_container_width=True, hide_index=True)
+                if _total_test < 30:
+                    st.warning("Small sample: this is a preliminary historical result, not a reliable estimate of future win probability. Aim for 30+ closed trades and test other periods too.")
+                st.info("This test evaluates the strategy on loaded historical candles. It does not prove future accuracy and does not execute live trades.")
 
 # -----------------------------
 # MTF table
