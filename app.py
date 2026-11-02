@@ -1031,7 +1031,9 @@ raw_direction = (
 )
 
 final_signal = signal_info["signal"]
-mtf_status = "PASS"
+# MTF is not confirmed unless it was enabled and returned an aligned direction.
+# Never show PASS when the filter is disabled or the higher-timeframe data is unavailable.
+mtf_status = "OFF" if not mtf_enabled else "UNAVAILABLE"
 
 if mtf_enabled and mtf_dir in ["BUY", "SELL"]:
     if raw_direction in ["BUY", "SELL"] and raw_direction != mtf_dir:
@@ -1040,9 +1042,10 @@ if mtf_enabled and mtf_dir in ["BUY", "SELL"]:
             final_signal = "WAIT"
     elif raw_direction == mtf_dir:
         mtf_status = "PASS"
-else:
-    if mtf_enabled:
-        mtf_status = "CONFLICT" if mtf_dir == "CONFLICT" else "UNAVAILABLE"
+    else:
+        mtf_status = "UNAVAILABLE"
+elif mtf_enabled:
+    mtf_status = "CONFLICT" if mtf_dir == "CONFLICT" else "UNAVAILABLE"
 
 # Rebuild trade only when final signal survives MTF filter.
 if final_signal != signal_info["signal"]:
