@@ -294,7 +294,25 @@ def fetch_candles(api_key, symbol, interval, outputsize):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
+    # Twelve Data timestamps may be returned in the exchange timezone without an
+    # explicit UTC offset. Localize those timestamps using response meta timezone
+    # when available, then convert to UTC so stale/future checks are comparable.
+    meta = data.get("meta", {}) or {}
+    raw_times = pd.to_datetime(df["datetime"], errors="coerce")
+    if getattr(raw_times.dt, "tz", None) is None:
+        provider_tz = meta.get("timezone") or meta.get("exchange_timezone")
+        if provider_tz:
+            try:
+                raw_times = raw_times.dt.tz_localize(
+                    provider_tz, ambiguous="NaT", nonexistent="shift_forward"
+                )
+            except (TypeError, ValueError):
+                # Unknown/malformed timezone: leave timestamps naive and flag
+                # validation uncertainty in the UI rather than crashing data load.
+                pass
+    if getattr(raw_times.dt, "tz", None) is not None:
+        raw_times = raw_times.dt.tz_convert("UTC")
+    df["datetime"] = raw_times
     df = (
         df.dropna(subset=required)
         .drop_duplicates(subset=["datetime"])
@@ -1182,26 +1200,37 @@ st.caption(
 
 
 # ================= STALE DATA WARNING =================
-# Use the candle datetime column, not the DataFrame's RangeIndex (0, 1, 2...).
+# Candle timestamps are normalized to UTC in fetch_candles whenever the provider
+# supplies a timezone. For naive timestamps, do not falsely claim they are UTC.
 try:
     if "df" in locals() and not df.empty and "datetime" in df.columns:
         latest_value = pd.to_datetime(df["datetime"].iloc[-1], errors="coerce")
-        if pd.notna(latest_value):
-            now_value = pd.Timestamp.now(tz=latest_value.tz) if latest_value.tzinfo is not None else pd.Timestamp.now()
-            age_hours = (now_value - latest_value).total_seconds() / 3600.0
-            if age_hours < -1:
-                st.warning(
+        if pd.isna(latest_value):
+            st.warning("Could not validate candle age: latest candle timestamp is invalid.")
+        elif latest_value.tzinfo is None:
+            st.warning(
+                "Candle timestamp has no timezone information. Check Twelve Data "
+                "metadata/timezone before relying on live signals."
+            )
+        else:
+            now_value = pd.Timestamp.now(tz="UTC")
+            latest_utc = latest_value.tz_convert("UTC")
+            age_hours = (now_value - latest_utc).total_seconds() / 3600
+            # Allow a small future tolerance for provider clock/candle-boundary differences.
+            if age_hours < -1.0:
+                st.error(
                     f"⚠️ Candle timestamp is {abs(age_hours):.1f} hours in the future "
-                    f"({latest_value}). Check the data provider/timezone."
+                    f"({latest_utc}). Check provider timezone metadata."
                 )
             elif age_hours > 72:
                 st.error(
-                    f"⚠️ STALE DATA WARNING: latest candle is about {age_hours:.1f} hours old "
-                    f"({latest_value}). Do not trade from this data."
+                    f"⚠️ STALE DATA WARNING: latest candle is about {age_hours:.1f} "
+                    f"hours old ({latest_utc}). Do not trade from this data."
                 )
-            else:
-                st.caption(f"Latest candle age: {max(0.0, age_hours):.1f} hours.")
-    else:
-        st.warning("Could not validate candle age because the datetime column is unavailable.")
+            elif age_hours > 2:
+                st.warning(
+                    f"Latest candle is {age_hours:.1f} hours old. Check market hours "
+                    "and provider updates before relying on the signal."
+                )
 except Exception as exc:
     st.warning(f"Could not validate latest candle timestamp: {str(exc)[:120]}")
