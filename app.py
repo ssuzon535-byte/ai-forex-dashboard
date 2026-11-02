@@ -258,6 +258,19 @@ with st.sidebar:
             else:
                 st.error(f"❌ {market_name}: {result['message']}")
 
+        ok_count = sum(1 for result in api_results.values() if result["status"] == "OK")
+        rate_limited = any(result["status"] == "RATE LIMIT" for result in api_results.values())
+        error_count = sum(1 for result in api_results.values() if result["status"] == "ERROR")
+        not_tested_count = max(0, len(SYMBOLS) - len(api_results))
+        st.divider()
+        st.markdown("**API Test Summary**")
+        st.write(f"Successful: {ok_count} / {len(SYMBOLS)}")
+        st.write(f"Failed: {error_count}")
+        if not_tested_count:
+            st.info(f"Not tested: {not_tested_count} market(s). " + ("Testing stopped after a rate limit to avoid extra API requests." if rate_limited else ""))
+        if error_count:
+            st.caption("A failed symbol does not necessarily mean your API key is wrong. Check the specific provider error; some instruments may require a different symbol format or plan support.")
+
 
 # -----------------------------
 # Data
