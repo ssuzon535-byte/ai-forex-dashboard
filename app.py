@@ -245,11 +245,21 @@ with st.sidebar:
 
     st.divider()
     st.subheader("🔌 API Connection")
+    st.caption("To reduce API-credit usage, this test checks only 3 markets per run.")
 
-    if st.button("🧪 Test Twelve Data API — All Markets", use_container_width=True):
-        st.warning("This test makes multiple API requests. If a 429 rate limit appears, wait before testing again.")
-        with st.spinner("Testing supported markets..."):
-            api_results = test_twelve_data_api(api_key, SYMBOLS, "15min")
+    if "api_test_offset" not in st.session_state:
+        st.session_state.api_test_offset = 0
+
+    if st.button("🧪 Test next 3 markets", use_container_width=True):
+        market_items = list(SYMBOLS.items())
+        batch_size = 3
+        start_at = st.session_state.api_test_offset % len(market_items)
+        batch = market_items[start_at:start_at + batch_size]
+        if len(batch) < batch_size:
+            batch += market_items[:batch_size - len(batch)]
+        batch_symbols = dict(batch)
+        with st.spinner("Testing 3 markets only..."):
+            api_results = test_twelve_data_api(api_key, batch_symbols, "15min")
         for market_name, result in api_results.items():
             if result["status"] == "OK":
                 st.success(f"✅ {market_name}: {result['message']}")
@@ -261,15 +271,18 @@ with st.sidebar:
         ok_count = sum(1 for result in api_results.values() if result["status"] == "OK")
         rate_limited = any(result["status"] == "RATE LIMIT" for result in api_results.values())
         error_count = sum(1 for result in api_results.values() if result["status"] == "ERROR")
-        not_tested_count = max(0, len(SYMBOLS) - len(api_results))
         st.divider()
-        st.markdown("**API Test Summary**")
-        st.write(f"Successful: {ok_count} / {len(SYMBOLS)}")
+        st.markdown("**API Test Summary (this batch only)**")
+        st.write(f"Successful: {ok_count} / {len(batch_symbols)}")
         st.write(f"Failed: {error_count}")
-        if not_tested_count:
-            st.info(f"Not tested: {not_tested_count} market(s). " + ("Testing stopped after a rate limit to avoid extra API requests." if rate_limited else ""))
+        st.write(f"Not tested in this batch: {len(SYMBOLS) - len(batch_symbols)} other markets")
+        if rate_limited:
+            st.info("Rate limit reached. Stop testing and wait at least 60 seconds before trying again.")
         if error_count:
-            st.caption("A failed symbol does not necessarily mean your API key is wrong. Check the specific provider error; some instruments may require a different symbol format or plan support.")
+            st.caption("A 404 means the provider did not find that symbol/endpoint. Verify the exact symbol in Twelve Data's Commodities list; it does not automatically mean your API key is wrong.")
+        if not rate_limited:
+            st.session_state.api_test_offset = (start_at + batch_size) % len(market_items)
+            st.caption("Press the button again to test the next batch of 3 markets.")
 
 
 # -----------------------------
