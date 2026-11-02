@@ -43,7 +43,6 @@ def trade_result_from_path(entry, sl, tp, highs, lows, direction):
 
 SYMBOLS = {
     "Gold (XAU/USD)": "XAU/USD",
-    "Silver (XAG/USD)": "XAG/USD",
     "EUR/USD": "EUR/USD",
     "GBP/USD": "GBP/USD",
     "USD/JPY": "USD/JPY",
@@ -291,12 +290,18 @@ with st.sidebar:
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_candles(api_key, symbol, interval, outputsize):
     url = "https://api.twelvedata.com/time_series"
+
+    # Twelve Data does not provide a native 10-minute interval. Build 10M
+    # candles locally from 5-minute OHLC candles instead of requesting 10min.
+    request_interval = "5min" if interval == "10min" else interval
+    request_outputsize = min(int(outputsize) * 2, 5000) if interval == "10min" else int(outputsize)
+
     response = requests.get(
         url,
         params={
             "symbol": symbol,
-            "interval": interval,
-            "outputsize": outputsize,
+            "interval": request_interval,
+            "outputsize": request_outputsize,
             "apikey": api_key,
             "format": "JSON",
         },
@@ -345,6 +350,24 @@ def fetch_candles(api_key, symbol, interval, outputsize):
         .sort_values("datetime")
         .reset_index(drop=True)
     )
+
+    # Aggregate 5-minute bars into 10-minute OHLC bars when 10M is selected.
+    if interval == "10min":
+        indexed = df.set_index("datetime").sort_index()
+        aggregations = {
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+        }
+        if "volume" in indexed.columns:
+            aggregations["volume"] = "sum"
+        df = (
+            indexed.resample("10min", origin="start_day", label="left", closed="left")
+            .agg(aggregations)
+            .dropna(subset=["open", "high", "low", "close"])
+            .reset_index()
+        )
 
     if len(df) < 80:
         raise ValueError("Not enough candles returned by the data provider.")
@@ -1030,7 +1053,7 @@ col4.metric("Technical Score %", f"{signal_info['technical_score_pct']}%")
 col5.metric("Regime", regime)
 
 st.caption(
-    f"Analysis candle: {price_time} | Data refresh cache: 45 sec | "
+    f"Analysis candle: {price_time} | Data refresh cache: 120 sec | "
     f"Signal mode: {signal_mode}"
 )
 
