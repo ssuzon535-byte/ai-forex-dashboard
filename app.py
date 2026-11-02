@@ -220,6 +220,30 @@ def test_twelve_data_api(api_key, symbols, interval="15min"):
 
 with st.sidebar:
     st.divider()
+    st.subheader("🧪 Dashboard Accuracy Test")
+    if st.button("Run dashboard logic self-test", use_container_width=True):
+        test_results = []
+        # Pure logic checks do not consume Twelve Data API credits.
+        try:
+            test_results.append(("Win-rate calculation", safe_accuracy_pct(2, 4) == 50.0))
+            test_results.append(("Invalid win-rate guard", safe_accuracy_pct(5, 0) == 0.0))
+            test_results.append(("BUY stop-loss precedence", trade_result_from_path(100, 95, 110, [111], [94], "BUY") == "LOSS"))
+            test_results.append(("SELL stop-loss precedence", trade_result_from_path(100, 105, 90, [106], [89], "SELL") == "LOSS"))
+            test_results.append(("MTF 15M mapping", smart_mtf_intervals("15min") == ["1h"]))
+            test_results.append(("MTF 5M mapping", smart_mtf_intervals("5min") == ["15min", "1h"]))
+            for test_name, passed in test_results:
+                if passed:
+                    st.success(f"PASS: {test_name}")
+                else:
+                    st.error(f"FAIL: {test_name}")
+            if all(passed for _, passed in test_results):
+                st.success(f"Dashboard logic self-test passed: {len(test_results)}/{len(test_results)} checks.")
+            else:
+                st.warning(f"Dashboard logic self-test: {sum(p for _, p in test_results)}/{len(test_results)} checks passed.")
+        except Exception as exc:
+            st.error(f"Dashboard self-test could not complete: {str(exc)[:150]}")
+
+    st.divider()
     st.subheader("🔌 API Connection")
 
     if st.button("🧪 Test Twelve Data API — All Markets", use_container_width=True):
@@ -1157,86 +1181,27 @@ st.caption(
 )
 
 
-# ================= FINAL TRADE ANALYSIS =================
-st.markdown("---")
-st.subheader("📊 Final Trade Analysis")
-
-try:
-    _bt = bt_trades.copy() if "bt_trades" in locals() and hasattr(bt_trades, "copy") else pd.DataFrame()
-except Exception:
-    _bt = pd.DataFrame()
-
-if _bt.empty:
-    st.info("No completed trades yet. WAIT signals are not counted as trades.")
-else:
-    # Normalize common column names from the existing backtest.
-    _bt.columns = [str(c) for c in _bt.columns]
-    result_col = next((c for c in ["Result", "result", "Outcome", "outcome", "Status", "status"] if c in _bt.columns), None)
-    dir_col = next((c for c in ["Direction", "direction", "Side", "side", "Signal", "signal"] if c in _bt.columns), None)
-    r_col = next((c for c in ["R", "r", "R_Multiple", "R Multiple", "Net R"] if c in _bt.columns), None)
-
-    if result_col:
-        _res = _bt[result_col].astype(str).str.upper()
-        _wins = int(_res.isin(["WIN", "WON", "TP", "PROFIT"]).sum())
-        _losses = int(_res.isin(["LOSS", "LOST", "SL"]).sum())
-        _closed = _wins + _losses
-    else:
-        _wins = _losses = 0
-        _closed = 0
-
-    _win_rate = safe_accuracy_pct(_wins, _closed)
-    _total = len(_bt)
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Closed Trades", _closed)
-    c2.metric("Wins", _wins)
-    c3.metric("Losses", _losses)
-    c4.metric("Win Rate", f"{_win_rate:.1f}%")
-
-    if _total < 20:
-        st.warning(f"⚠️ Only {_total} completed trade(s). Accuracy is not statistically reliable yet. Aim for at least 20–30 trades.")
-
-    # Direction breakdown
-    if dir_col:
-        _d = _bt[dir_col].astype(str).str.upper()
-        _rows = []
-        for _side in ["BUY", "SELL"]:
-            _mask = _d.eq(_side)
-            _side_df = _bt[_mask]
-            _side_n = len(_side_df)
-            if result_col:
-                _sr = _side_df[result_col].astype(str).str.upper()
-                _sw = int(_sr.isin(["WIN", "WON", "TP", "PROFIT"]).sum())
-                _sl = int(_sr.isin(["LOSS", "LOST", "SL"]).sum())
-            else:
-                _sw = _sl = 0
-            _acc = safe_accuracy_pct(_sw, _sw + _sl)
-            _rows.append({"Direction": _side, "Trades": _side_n, "Wins": _sw, "Losses": _sl, "Accuracy": f"{_acc:.1f}%"})
-        st.markdown("**BUY / SELL Performance**")
-        st.dataframe(pd.DataFrame(_rows), use_container_width=True, hide_index=True)
-
-    # Full final trade table
-    st.markdown("**Completed Trade History**")
-    st.dataframe(_bt.tail(50), use_container_width=True, hide_index=True)
-
-
 # ================= STALE DATA WARNING =================
+# Use the candle datetime column, not the DataFrame's RangeIndex (0, 1, 2...).
 try:
-    _latest_candidates = []
-    for _name in ["df", "data", "candles", "df_main"]:
-        if _name in locals():
-            _obj = locals()[_name]
-            if hasattr(_obj, "index") and len(_obj.index):
-                _latest_candidates.append(_obj.index[-1])
-    if _latest_candidates:
-        _latest = pd.to_datetime(_latest_candidates[-1], errors="coerce")
-        if pd.notna(_latest):
-            if getattr(_latest, "tzinfo", None) is None:
-                _now = pd.Timestamp.now()
+    if "df" in locals() and not df.empty and "datetime" in df.columns:
+        latest_value = pd.to_datetime(df["datetime"].iloc[-1], errors="coerce")
+        if pd.notna(latest_value):
+            now_value = pd.Timestamp.now(tz=latest_value.tz) if latest_value.tzinfo is not None else pd.Timestamp.now()
+            age_hours = (now_value - latest_value).total_seconds() / 3600.0
+            if age_hours < -1:
+                st.warning(
+                    f"⚠️ Candle timestamp is {abs(age_hours):.1f} hours in the future "
+                    f"({latest_value}). Check the data provider/timezone."
+                )
+            elif age_hours > 72:
+                st.error(
+                    f"⚠️ STALE DATA WARNING: latest candle is about {age_hours:.1f} hours old "
+                    f"({latest_value}). Do not trade from this data."
+                )
             else:
-                _now = pd.Timestamp.now(tz=_latest.tz)
-            _age_hours = (_now - _latest).total_seconds() / 3600
-            if _age_hours > 72:
-                st.error(f"⚠️ STALE DATA WARNING: latest candle is about {_age_hours:.1f} hours old ({_latest}). Do not trade from this data.")
-except Exception:
-    pass
+                st.caption(f"Latest candle age: {max(0.0, age_hours):.1f} hours.")
+    else:
+        st.warning("Could not validate candle age because the datetime column is unavailable.")
+except Exception as exc:
+    st.warning(f"Could not validate latest candle timestamp: {str(exc)[:120]}")
