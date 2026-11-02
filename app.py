@@ -1106,20 +1106,21 @@ if final_signal in ["BUY", "STRONG BUY", "SELL", "STRONG SELL"] and trade:
         tp2_txt = format_price(trade["tp2"], symbol)
         tp3_txt = format_price(trade["tp3"], symbol)
 
-        a, b, c, d, e = st.columns(5)
+        # Use two compact rows instead of five narrow columns so values remain
+        # readable on mobile screens and are not visually clipped/wrapped.
+        a, b, c = st.columns(3)
         a.metric("Direction", trade["direction"])
         b.metric("Entry", entry_txt)
-        c.metric("SL", sl_txt)
-        d.metric("TP1", tp1_txt)
-        e.metric("TP2", tp2_txt)
+        c.metric("Stop Loss (SL)", sl_txt)
 
-        st.write(
-            f"**Entry:** `{entry_txt}`  |  **SL:** `{sl_txt}`  |  "
-            f"**TP1:** `{tp1_txt}`  |  **TP2:** `{tp2_txt}`  |  **TP3:** `{tp3_txt}`"
-        )
-        st.write(
-            f"**Risk distance:** `{trade['risk_distance']:.5f}`  |  "
-            f"**Risk budget:** `${risk_amount:.2f}`"
+        d, e, f = st.columns(3)
+        d.metric("Take Profit 1", tp1_txt)
+        e.metric("Take Profit 2", tp2_txt)
+        f.metric("Take Profit 3", tp3_txt)
+
+        st.caption(
+            f"Risk distance: `{trade['risk_distance']:.5f}` | "
+            f"Risk budget: `${risk_amount:.2f}`"
         )
 
     if mtf_enabled:
