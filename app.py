@@ -329,9 +329,7 @@ def fetch_candles(api_key, symbol, interval, outputsize):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Twelve Data was explicitly asked to return Asia/Dhaka timestamps.
-    # Interpret naive timestamps using that requested timezone, not the
-    # exchange timezone metadata, then store all timestamps internally as UTC.
+    # Normalize timestamps before validation, but record defects BEFORE cleaning.
     meta = data.get("meta", {}) or {}
     raw_times = pd.to_datetime(df["datetime"], errors="coerce")
     if getattr(raw_times.dt, "tz", None) is None:
@@ -343,37 +341,57 @@ def fetch_candles(api_key, symbol, interval, outputsize):
             raise ValueError(
                 "Could not interpret provider timestamps in Asia/Dhaka timezone."
             ) from exc
-    raw_times = raw_times.dt.tz_convert("UTC")
-    df["datetime"] = raw_times
+    df["datetime"] = raw_times.dt.tz_convert("UTC")
+
+    raw_issues = []
+    if df[required].isna().any().any():
+        raw_issues.append("Raw API response contains missing or invalid datetime/OHLC values.")
+    if df["datetime"].duplicated().any():
+        raw_issues.append("Raw API response contains duplicate candle timestamps.")
+    if not df["datetime"].is_monotonic_increasing:
+        raw_issues.append("Raw API candles were not in chronological order; sorted before analysis.")
+    raw_ohlc_bad = (
+        (df["high"] < df[["open", "close", "low"]].max(axis=1))
+        | (df["low"] > df[["open", "close", "high"]].min(axis=1))
+        | (df[["open", "high", "low", "close"]] <= 0).any(axis=1)
+    )
+    if raw_ohlc_bad.any():
+        raw_issues.append(f"Raw API response contains {int(raw_ohlc_bad.sum())} invalid/non-positive OHLC candle(s).")
+    meta["_raw_validation_issues"] = raw_issues
+
     df = (
         df.dropna(subset=required)
         .drop_duplicates(subset=["datetime"])
         .sort_values("datetime")
         .reset_index(drop=True)
     )
+    df = df[
+        (df[["open", "high", "low", "close"]] > 0).all(axis=1)
+        & (df["high"] >= df[["open", "close", "low"]].max(axis=1))
+        & (df["low"] <= df[["open", "close", "high"]].min(axis=1))
+    ].reset_index(drop=True)
 
-    # Aggregate 5-minute bars into 10-minute OHLC bars when 10M is selected.
+    # Aggregate only complete pairs of 5-minute candles into 10-minute bars.
     if interval == "10min":
         indexed = df.set_index("datetime").sort_index()
         aggregations = {
-            "open": "first",
-            "high": "max",
-            "low": "min",
-            "close": "last",
+            "open": "first", "high": "max", "low": "min", "close": "last",
         }
         if "volume" in indexed.columns:
             aggregations["volume"] = "sum"
-        df = (
-            indexed.resample("10min", origin="start_day", label="left", closed="left")
-            .agg(aggregations)
-            .dropna(subset=["open", "high", "low", "close"])
-            .reset_index()
+        grouped = indexed.resample(
+            "10min", origin="start_day", label="left", closed="left"
         )
+        df = grouped.agg(aggregations)
+        source_count = grouped["open"].count()
+        df = df[source_count == 2].dropna(
+            subset=["open", "high", "low", "close"]
+        ).reset_index()
 
     if len(df) < 80:
-        raise ValueError("Not enough candles returned by the data provider.")
+        raise ValueError("Not enough valid candles returned by the data provider after cleaning.")
 
-    return df, data.get("meta", {})
+    return df, meta
 
 
 def validate_market_data(df, interval):
@@ -412,7 +430,17 @@ def validate_market_data(df, interval):
                 "Forex market closure or missing provider data; review before trading."
             )
 
-    bad_ohlc = (df["high"] < df[["open", "close", "low"]].max(axis=1)) | (df["low"] > df[["open", "close", "high"]].min(axis=1))
+    numeric = df[["open", "high", "low", "close"]].apply(pd.to_numeric, errors="coerce")
+    invalid_numeric = numeric.isna().any(axis=1) | ~np.isfinite(numeric).all(axis=1)
+    non_positive = (numeric <= 0).any(axis=1)
+    bad_ohlc = (
+        (numeric["high"] < numeric[["open", "close", "low"]].max(axis=1))
+        | (numeric["low"] > numeric[["open", "close", "high"]].min(axis=1))
+    )
+    if invalid_numeric.any():
+        problems.append(f"{int(invalid_numeric.sum())} candle(s) contain non-numeric or infinite OHLC values.")
+    if non_positive.any():
+        problems.append(f"{int(non_positive.sum())} candle(s) contain zero/negative prices.")
     if bad_ohlc.any():
         problems.append(f"{int(bad_ohlc.sum())} candle(s) have inconsistent OHLC values.")
     latest = pd.to_datetime(df["datetime"].iloc[-1], errors="coerce")
@@ -834,20 +862,41 @@ def backtest(df, min_score=6, rr=2.0, cost_r=0.05):
 
         for j in range(next_i, len(df)):
             bar = df.iloc[j]
-            if direction == "BUY":
-                hit_sl, hit_tp = float(bar["low"]) <= sl, float(bar["high"]) >= tp
-            else:
-                hit_sl, hit_tp = float(bar["high"]) >= sl, float(bar["low"]) <= tp
+            bar_open = float(bar["open"])
+            bar_high = float(bar["high"])
+            bar_low = float(bar["low"])
 
-            # If both levels occur within one OHLC candle, conservatively assume SL first.
-            if hit_sl:
-                outcome, exit_price = "LOSS", sl
-                exit_time, exit_i = bar["datetime"], j
-                break
-            if hit_tp:
-                outcome, exit_price = "WIN", tp
-                exit_time, exit_i = bar["datetime"], j
-                break
+            # Model opening gaps at the next available open, not at an unreachable SL/TP.
+            if direction == "BUY":
+                if bar_open <= sl:
+                    outcome, exit_price = "LOSS", bar_open
+                elif bar_open >= tp:
+                    outcome, exit_price = "WIN", bar_open
+                else:
+                    hit_sl, hit_tp = bar_low <= sl, bar_high >= tp
+                    # If both levels occur within one OHLC candle, assume SL first.
+                    if hit_sl:
+                        outcome, exit_price = "LOSS", sl
+                    elif hit_tp:
+                        outcome, exit_price = "WIN", tp
+                    else:
+                        continue
+            else:
+                if bar_open >= sl:
+                    outcome, exit_price = "LOSS", bar_open
+                elif bar_open <= tp:
+                    outcome, exit_price = "WIN", bar_open
+                else:
+                    hit_sl, hit_tp = bar_high >= sl, bar_low <= tp
+                    if hit_sl:
+                        outcome, exit_price = "LOSS", sl
+                    elif hit_tp:
+                        outcome, exit_price = "WIN", tp
+                    else:
+                        continue
+
+            exit_time, exit_i = bar["datetime"], j
+            break
 
         if outcome is None:
             trades.append({
@@ -858,7 +907,10 @@ def backtest(df, min_score=6, rr=2.0, cost_r=0.05):
             })
             break
 
-        gross_r = float(rr if outcome == "WIN" else -1.0)
+        # Use actual modeled exit fill. Gap-through stops can lose more than 1R;
+        # favorable gaps can earn more than the planned RR.
+        signed_move = (exit_price - entry) if direction == "BUY" else (entry - exit_price)
+        gross_r = float(signed_move / risk)
         net_r = gross_r - float(cost_r)
         trades.append({
             "time": next_bar["datetime"], "direction": direction, "entry": entry,
@@ -992,13 +1044,15 @@ except Exception as exc:
 with st.expander("🧪 Twelve Data API / Market Data Validation", expanded=False):
     st.caption("Checks the candles already loaded by the dashboard. This does not send another API request.")
     if st.button("Run Market Data Validation", key="validate_loaded_market_data"):
-        _data_issues = validate_market_data(raw_df, interval)
+        _data_issues = list(meta.get("_raw_validation_issues", []))
+        _data_issues.extend(validate_market_data(raw_df, interval))
         if _data_issues:
-            st.error("Market data validation found issues:")
-            for _issue in _data_issues:
+            st.warning("Market data validation found warnings/issues:")
+            for _issue in dict.fromkeys(_data_issues):
                 st.write(f"• {_issue}")
+            st.info("Raw API defects are reported before cleaning. The analysis uses cleaned candles only.")
         else:
-            st.success(f"PASS: {len(raw_df)} candles passed timestamp, ordering and OHLC consistency checks.")
+            st.success(f"PASS: {len(raw_df)} cleaned candles passed timestamp, ordering, positive-price and OHLC checks.")
 
 # Use closed candle by default to reduce signal flipping/repainting.
 if signal_mode == "Closed candle (stable)" and len(df) >= 2:
@@ -1022,6 +1076,24 @@ trade = build_trade(
     rr2,
     rr3,
 )
+
+# In stable closed-candle mode, enter at the next candle's open, matching backtest.
+# Live-candle mode remains provisional and uses the currently forming candle close.
+if trade and signal_mode == "Closed candle (stable)" and len(df) >= 2:
+    next_open = float(df.iloc[-1]["open"])
+    risk_distance = float(trade["risk_distance"])
+    if np.isfinite(next_open) and risk_distance > 0:
+        trade["entry"] = next_open
+        if trade["direction"] == "BUY":
+            trade["sl"] = next_open - risk_distance
+            trade["tp1"] = next_open + risk_distance * rr1
+            trade["tp2"] = next_open + risk_distance * rr2
+            trade["tp3"] = next_open + risk_distance * rr3
+        else:
+            trade["sl"] = next_open + risk_distance
+            trade["tp1"] = next_open - risk_distance * rr1
+            trade["tp2"] = next_open - risk_distance * rr2
+            trade["tp3"] = next_open - risk_distance * rr3
 
 # -----------------------------
 # MTF confirmation
@@ -1083,7 +1155,8 @@ col5.metric("Regime", regime)
 
 st.caption(
     f"Analysis candle (Bangladesh time): {price_time_display} | Data refresh cache: 120 sec | "
-    f"Signal mode: {signal_mode}"
+    f"Signal mode: {signal_mode} | "
+    + ("Entry reference: next candle open" if signal_mode == "Closed candle (stable)" else "Entry reference: live candle close (provisional)")
 )
 
 # -----------------------------
