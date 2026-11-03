@@ -382,8 +382,11 @@ def fetch_candles(api_key, symbol, interval, outputsize):
         raw_issues.append("Raw API response contains missing or invalid datetime/OHLC values.")
     if df["datetime"].duplicated().any():
         raw_issues.append("Raw API response contains duplicate candle timestamps.")
-    if not df["datetime"].is_monotonic_increasing:
-        raw_issues.append("Raw API candles were not in chronological order; sorted before analysis.")
+    if not (
+        df["datetime"].is_monotonic_increasing
+        or df["datetime"].is_monotonic_decreasing
+    ):
+        raw_issues.append("Raw API candles have mixed timestamp order; sorted before analysis.")
     raw_ohlc_bad = (
         (df["high"] < df[["open", "close", "low"]].max(axis=1))
         | (df["low"] > df[["open", "close", "high"]].min(axis=1))
