@@ -187,7 +187,8 @@ with st.sidebar:
         "Minimum technical score",
         min_value=5,
         max_value=9,
-        value=6,
+        value=7,
+        help="Experimental setting: start at 7 based on the current small backtest sample. Re-test on more candles and other periods; this is not a proven accuracy improvement.",
     )
 
     if st.button("🔄 Refresh market data", use_container_width=True):
