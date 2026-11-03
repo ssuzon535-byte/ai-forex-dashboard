@@ -1299,6 +1299,35 @@ with right:
     if not bt_trades.empty:
         stats_df = direction_stats(bt_trades)
         st.dataframe(stats_df, use_container_width=True, hide_index=True)
+
+        # Score-wise report: closed outcomes only; OPEN trades are counted separately.
+        st.markdown("**📊 Score-wise Backtest Report**")
+        _score_rows = []
+        for _score_value in range(5, 10):
+            _score_part = bt_trades[bt_trades["score"] == _score_value]
+            _score_closed = _score_part[_score_part["result"].isin(["WIN", "LOSS"])]
+            _score_wins = int((_score_closed["result"] == "WIN").sum())
+            _score_losses = int((_score_closed["result"] == "LOSS").sum())
+            _score_gross_profit = float(_score_closed.loc[_score_closed["gross_R"] > 0, "gross_R"].sum()) if not _score_closed.empty else 0.0
+            _score_gross_loss = abs(float(_score_closed.loc[_score_closed["gross_R"] < 0, "gross_R"].sum())) if not _score_closed.empty else 0.0
+            _score_pf = (
+                _score_gross_profit / _score_gross_loss
+                if _score_gross_loss > 0
+                else (np.inf if _score_gross_profit > 0 else 0.0)
+            )
+            _score_rows.append({
+                "Score": _score_value,
+                "Closed Trades": len(_score_closed),
+                "Wins": _score_wins,
+                "Losses": _score_losses,
+                "Open": int((_score_part["result"] == "OPEN").sum()),
+                "Win Rate %": round(_score_wins / len(_score_closed) * 100, 1) if len(_score_closed) else 0.0,
+                "Gross R": round(float(_score_closed["gross_R"].sum()), 2) if not _score_closed.empty else 0.0,
+                "Net R": round(float(_score_closed["R"].sum()), 2) if not _score_closed.empty else 0.0,
+                "Profit Factor": "∞" if np.isinf(_score_pf) else round(_score_pf, 2),
+            })
+        st.dataframe(pd.DataFrame(_score_rows), use_container_width=True, hide_index=True)
+        st.caption("Each row shows trades with exactly that score. OPEN trades are excluded from Win Rate, Gross R, Net R and Profit Factor. A small number of trades is not enough to establish a reliable edge.")
         if bt_stats["trades"] < 20:
             st.warning(f"⚠️ Only {bt_stats['trades']} closed trades. Accuracy is not statistically reliable yet; aim for at least 20–30 trades before judging the strategy.")
         else:
