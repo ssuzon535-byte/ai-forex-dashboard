@@ -741,12 +741,29 @@ def get_signal(row, df, min_score=6):
     sell_score = int(sum(sell_checks))
     max_score = len(buy_checks)
 
-    # WAIT is preferred in a choppy market unless the technical setup is unusually strong.
-    if regime == "CHOPPY / RANGE" and max(buy_score, sell_score) < 8:
-        signal = "WAIT"
-    elif buy_score >= min_score and buy_score > sell_score:
+    # Quality gate: require trend alignment before allowing a scored signal.
+    # This intentionally reduces signal frequency to avoid counter-trend entries.
+    buy_quality = (
+        row["close"] > row["EMA50"]
+        and row["EMA20"] > row["EMA50"]
+        and row["RSI"] > 50
+        and row["MACD"] > row["MACD_signal"]
+        and row["ADX"] >= 20
+        and regime in ["UPTREND", "STRONG UPTREND"]
+    )
+    sell_quality = (
+        row["close"] < row["EMA50"]
+        and row["EMA20"] < row["EMA50"]
+        and row["RSI"] < 50
+        and row["MACD"] < row["MACD_signal"]
+        and row["ADX"] >= 20
+        and regime in ["DOWNTREND", "STRONG DOWNTREND"]
+    )
+
+    # A high score alone is not enough if the directional quality gate fails.
+    if buy_score >= min_score and buy_score > sell_score and buy_quality:
         signal = "STRONG BUY" if buy_score >= 8 else "BUY"
-    elif sell_score >= min_score and sell_score > buy_score:
+    elif sell_score >= min_score and sell_score > buy_score and sell_quality:
         signal = "STRONG SELL" if sell_score >= 8 else "SELL"
     else:
         signal = "WAIT"
