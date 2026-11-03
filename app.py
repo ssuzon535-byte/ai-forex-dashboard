@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timezone
 
 st.set_page_config(
-    page_title="AI Forex Market Analysis V7",
+    page_title="AI Forex Market Analysis V8",
     page_icon="📊",
     layout="wide",
 )
@@ -111,7 +111,7 @@ def smart_mtf_intervals(main_interval):
     }
     return mapping.get(main_interval, ["1h"])
 
-st.title("📊 AI Forex Market Analysis V7")
+st.title("📊 AI Forex Market Analysis V8")
 st.caption(
     "Live technical analysis + MTF confirmation + market regime + historical backtest. "
     "Educational tool; not guaranteed financial advice."
@@ -557,6 +557,10 @@ def add_indicators(df):
     d["MACD_signal"] = d["MACD"].ewm(span=9, adjust=False).mean()
     d["MACD_hist"] = d["MACD"] - d["MACD_signal"]
 
+    # Directional movement confirmation (Wilder-style smoothed DI).
+    d["PLUS_DI"] = plus_di
+    d["MINUS_DI"] = minus_di
+
     d["BB_mid"] = d["close"].rolling(20).mean()
     bb_std = d["close"].rolling(20).std()
     d["BB_upper"] = d["BB_mid"] + 2 * bb_std
@@ -743,20 +747,45 @@ def get_signal(row, df, min_score=6):
 
     # Quality gate: require trend alignment before allowing a scored signal.
     # This intentionally reduces signal frequency to avoid counter-trend entries.
+    # V8 quality gate: require directional trend structure, DI agreement,
+    # positive/negative EMA20 slope, and avoid chasing an overextended candle.
+    # These are filters, not a claim of a particular future win probability.
+    prior_ema20 = (
+        float(previous_row["EMA20"])
+        if previous_row is not None and pd.notna(previous_row.get("EMA20"))
+        else float(row["EMA20"])
+    )
+    ema20_slope_up = float(row["EMA20"]) > prior_ema20
+    ema20_slope_down = float(row["EMA20"]) < prior_ema20
+    atr_value = float(row["ATR"])
+    extension_atr = (
+        abs(float(row["close"]) - float(row["EMA20"])) / atr_value
+        if atr_value > 0 else np.inf
+    )
+    plus_di_value = float(row.get("PLUS_DI", np.nan))
+    minus_di_value = float(row.get("MINUS_DI", np.nan))
+    di_valid = np.isfinite(plus_di_value) and np.isfinite(minus_di_value)
+
     buy_quality = (
-        row["close"] > row["EMA50"]
+        row["close"] > row["EMA50"] > row["EMA200"]
         and row["EMA20"] > row["EMA50"]
+        and ema20_slope_up
         and row["RSI"] > 50
         and row["MACD"] > row["MACD_signal"]
         and row["ADX"] >= 20
+        and di_valid and plus_di_value > minus_di_value
+        and extension_atr <= 1.25
         and regime in ["UPTREND", "STRONG UPTREND"]
     )
     sell_quality = (
-        row["close"] < row["EMA50"]
+        row["close"] < row["EMA50"] < row["EMA200"]
         and row["EMA20"] < row["EMA50"]
+        and ema20_slope_down
         and row["RSI"] < 50
         and row["MACD"] < row["MACD_signal"]
         and row["ADX"] >= 20
+        and di_valid and minus_di_value > plus_di_value
+        and extension_atr <= 1.25
         and regime in ["DOWNTREND", "STRONG DOWNTREND"]
     )
 
@@ -1446,11 +1475,16 @@ if mtf_enabled:
 st.subheader("📉 Price + Indicators")
 
 chart_df = df.tail(min(180, len(df))).copy()
-# Plotly receives Bangladesh-local naive timestamps so chart labels/hover times
-# remain in Bangladesh time regardless of the viewer's device timezone.
-chart_df["datetime"] = (
-    chart_df["datetime"].dt.tz_convert("Asia/Dhaka").dt.tz_localize(None)
-)
+# Normalize chart inputs explicitly and discard rows Plotly cannot render.
+chart_df["datetime"] = pd.to_datetime(
+    chart_df["datetime"], utc=True, errors="coerce"
+).dt.tz_convert("Asia/Dhaka").dt.tz_localize(None)
+_chart_numeric = ["open", "high", "low", "close", "EMA20", "EMA50", "EMA200"]
+for _col in _chart_numeric:
+    chart_df[_col] = pd.to_numeric(chart_df[_col], errors="coerce")
+chart_df = chart_df.replace([np.inf, -np.inf], np.nan)
+chart_df = chart_df.dropna(subset=["datetime", "open", "high", "low", "close"])
+chart_df = chart_df.sort_values("datetime").reset_index(drop=True)
 
 fig = go.Figure()
 fig.add_trace(
@@ -1498,8 +1532,17 @@ fig.update_layout(
     height=650,
     xaxis_rangeslider_visible=False,
     margin=dict(l=10, r=10, t=30, b=10),
+    template="plotly_white",
+    hovermode="x unified",
 )
-st.plotly_chart(fig, use_container_width=True)
+if chart_df.empty:
+    st.warning("Price chart unavailable: no valid timestamp/OHLC rows remained after chart validation.")
+else:
+    st.caption(
+        f"Chart candles: {len(chart_df)} | "
+        f"{chart_df['datetime'].iloc[0]} to {chart_df['datetime'].iloc[-1]} (Bangladesh time)"
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
 # -----------------------------
 # Backtest details
@@ -1530,7 +1573,7 @@ with st.expander("🔎 Current indicator values"):
     indicator_cols = [
         "datetime", "open", "high", "low", "close",
         "EMA20", "EMA50", "EMA200",
-        "RSI", "ATR", "ADX", "MACD", "MACD_signal",
+        "RSI", "ATR", "ADX", "PLUS_DI", "MINUS_DI", "MACD", "MACD_signal",
         "BB_upper", "BB_mid", "BB_lower"
     ]
     indicator_display = df[indicator_cols].tail(10).copy()
