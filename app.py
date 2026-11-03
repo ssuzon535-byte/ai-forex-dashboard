@@ -134,8 +134,9 @@ with st.sidebar:
 
     outputsize = st.select_slider(
         "Candles to load",
-        options=[150, 200, 300, 400, 500],
-        value=300,
+        options=[150, 200, 300, 400, 500, 750, 1000],
+        value=1000,
+        help="Loads up to 1,000 candles for a larger historical backtest sample. More candles improve sample size, not signal accuracy by themselves.",
     )
 
     signal_mode = st.radio(
