@@ -668,7 +668,9 @@ def market_regime(row, df):
 # -----------------------------
 # Signal engine
 # -----------------------------
-def get_signal(row, df, min_score=6):
+def get_signal(row, df, min_score=6, experiment=None):
+    cfg = {"rsi_buy":52.0,"rsi_sell":48.0,"adx_score":18.0,"adx_gate":20.0,"extension_atr":1.25,"use_candle":True,"use_di":True,"use_slope":True,"use_ema_structure":True}
+    if experiment: cfg.update(experiment)
     required = [
         "close", "EMA20", "EMA50", "EMA200",
         "RSI", "MACD", "MACD_signal", "ADX",
@@ -706,10 +708,10 @@ def get_signal(row, df, min_score=6):
         bool(row["close"] > row["EMA20"]),
         bool(row["EMA20"] > row["EMA50"]),
         bool(row["EMA50"] > row["EMA200"]),
-        bool(row["RSI"] > 52),
+        bool(row["RSI"] > cfg["rsi_buy"]),
         bool(row["MACD"] > row["MACD_signal"]),
-        bool(row["ADX"] >= 18),
-        bool(candle["bull"] and not candle["doji"]),
+        bool(row["ADX"] >= cfg["adx_score"]),
+        bool((candle["bull"] and not candle["doji"]) if cfg["use_candle"] else True),
         bool(row["close"] > row["BB_mid"]),
         bool(regime in ["UPTREND", "STRONG UPTREND"]),
     ]
@@ -718,10 +720,10 @@ def get_signal(row, df, min_score=6):
         bool(row["close"] < row["EMA20"]),
         bool(row["EMA20"] < row["EMA50"]),
         bool(row["EMA50"] < row["EMA200"]),
-        bool(row["RSI"] < 48),
+        bool(row["RSI"] < cfg["rsi_sell"]),
         bool(row["MACD"] < row["MACD_signal"]),
-        bool(row["ADX"] >= 18),
-        bool(candle["bear"] and not candle["doji"]),
+        bool(row["ADX"] >= cfg["adx_score"]),
+        bool((candle["bear"] and not candle["doji"]) if cfg["use_candle"] else True),
         bool(row["close"] < row["BB_mid"]),
         bool(regime in ["DOWNTREND", "STRONG DOWNTREND"]),
     ]
@@ -752,25 +754,23 @@ def get_signal(row, df, min_score=6):
     di_valid = np.isfinite(plus_di_value) and np.isfinite(minus_di_value)
 
     buy_quality = (
-        row["close"] > row["EMA50"] > row["EMA200"]
-        and row["EMA20"] > row["EMA50"]
-        and ema20_slope_up
-        and row["RSI"] > 50
+        (row["close"] > row["EMA50"] > row["EMA200"] and row["EMA20"] > row["EMA50"] if cfg["use_ema_structure"] else True)
+        and (ema20_slope_up if cfg["use_slope"] else True)
+        and row["RSI"] > (cfg["rsi_buy"] - 2.0)
         and row["MACD"] > row["MACD_signal"]
-        and row["ADX"] >= 20
-        and di_valid and plus_di_value > minus_di_value
-        and extension_atr <= 1.25
+        and row["ADX"] >= cfg["adx_gate"]
+        and ((di_valid and plus_di_value > minus_di_value) if cfg["use_di"] else True)
+        and extension_atr <= cfg["extension_atr"]
         and regime in ["UPTREND", "STRONG UPTREND"]
     )
     sell_quality = (
-        row["close"] < row["EMA50"] < row["EMA200"]
-        and row["EMA20"] < row["EMA50"]
-        and ema20_slope_down
-        and row["RSI"] < 50
+        (row["close"] < row["EMA50"] < row["EMA200"] and row["EMA20"] < row["EMA50"] if cfg["use_ema_structure"] else True)
+        and (ema20_slope_down if cfg["use_slope"] else True)
+        and row["RSI"] < (cfg["rsi_sell"] + 2.0)
         and row["MACD"] < row["MACD_signal"]
-        and row["ADX"] >= 20
-        and di_valid and minus_di_value > plus_di_value
-        and extension_atr <= 1.25
+        and row["ADX"] >= cfg["adx_gate"]
+        and ((di_valid and minus_di_value > plus_di_value) if cfg["use_di"] else True)
+        and extension_atr <= cfg["extension_atr"]
         and regime in ["DOWNTREND", "STRONG DOWNTREND"]
     )
 
@@ -914,7 +914,7 @@ def expected_interval_minutes(interval):
     return {"5min": 5, "15min": 15, "1h": 60}.get(interval)
 
 
-def backtest(df, min_score=6, rr=2.0, cost_r=0.05, interval=None, start_index=None, end_index=None):
+def backtest(df, min_score=6, rr=2.0, cost_r=0.05, interval=None, start_index=None, end_index=None, experiment=None):
     """Conservative non-overlapping bar-by-bar backtest with estimated costs in R."""
     try:
         rr = float(rr)
@@ -943,7 +943,7 @@ def backtest(df, min_score=6, rr=2.0, cost_r=0.05, interval=None, start_index=No
     i = start_i
     while i < stop_i - 1:
         row = df.iloc[i]
-        result = get_signal(row, df.iloc[:i + 1], min_score=min_score)
+        result = get_signal(row, df.iloc[:i + 1], min_score=min_score, experiment=experiment)
         if result["signal"] not in ["BUY", "STRONG BUY", "SELL", "STRONG SELL"]:
             i += 1
             continue
@@ -1451,6 +1451,38 @@ with right:
             })
         st.dataframe(pd.DataFrame(_threshold_rows), use_container_width=True, hide_index=True)
         st.caption("This is a threshold sensitivity check, not proof of future performance. Very small trade samples are unreliable.")
+
+    # Decision-factor sensitivity tests on the identical chronological holdout.
+    if len(df) - _holdout_start >= 30:
+        with st.expander("🧪 Decision Factor Experiment (same holdout)", expanded=True):
+            st.caption("One factor changes per row. Compare Net R, Profit Factor, drawdown and trade count, not win rate alone. Diagnostic only; live settings remain unchanged.")
+            _experiment_cases = [
+                ("Baseline", min_score, rr2, {}),
+                ("Minimum score 5", 5, rr2, {}), ("Minimum score 7", 7, rr2, {}),
+                ("Minimum score 8", 8, rr2, {}), ("Minimum score 9", 9, rr2, {}),
+                ("RSI 50/50", min_score, rr2, {"rsi_buy":50.0,"rsi_sell":50.0}),
+                ("RSI 55/45", min_score, rr2, {"rsi_buy":55.0,"rsi_sell":45.0}),
+                ("ADX 18", min_score, rr2, {"adx_score":18.0,"adx_gate":18.0}),
+                ("ADX 22", min_score, rr2, {"adx_score":22.0,"adx_gate":22.0}),
+                ("ADX 25", min_score, rr2, {"adx_score":25.0,"adx_gate":25.0}),
+                ("Extension 1.0 ATR", min_score, rr2, {"extension_atr":1.0}),
+                ("Extension 1.5 ATR", min_score, rr2, {"extension_atr":1.5}),
+                ("Extension 2.0 ATR", min_score, rr2, {"extension_atr":2.0}),
+                ("Candle filter OFF", min_score, rr2, {"use_candle":False}),
+                ("DI filter OFF", min_score, rr2, {"use_di":False}),
+                ("EMA slope OFF", min_score, rr2, {"use_slope":False}),
+                ("EMA structure OFF", min_score, rr2, {"use_ema_structure":False}),
+                ("RR 1:1.5", min_score, 1.5, {}), ("RR 1:2.5", min_score, 2.5, {}),
+            ]
+            _exp_rows = []
+            for _label, _score, _rr, _cfg in _experiment_cases:
+                _, _st = backtest(df, min_score=_score, rr=_rr, cost_r=estimated_cost_r,
+                    interval=interval, start_index=_holdout_start, end_index=len(df), experiment=_cfg)
+                _exp_rows.append({"Test":_label,"Trades":_st["trades"],"Win rate %":round(_st["win_rate"],1),
+                    "Net R":round(_st["net_r"],2),"Profit Factor":"∞" if np.isinf(_st["profit_factor"]) else round(_st["profit_factor"],2),
+                    "Max DD R":round(_st["max_drawdown_r"],2)})
+            st.dataframe(pd.DataFrame(_exp_rows), use_container_width=True, hide_index=True)
+            st.caption("This is a one-factor-at-a-time test. Combined interactions are not tested. Small samples are unreliable; validate promising settings on a separate later period.")
 
     if not bt_trades.empty:
         stats_df = direction_stats(bt_trades)
