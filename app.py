@@ -41,6 +41,35 @@ def trade_result_from_path(entry, sl, tp, highs, lows, direction):
     return "OPEN"
 
 
+def resolve_bar_exit(direction, sl, tp, bar_open, bar_high, bar_low):
+    """Return conservative OHLC exit outcome/price, accounting for opening gaps."""
+    direction = str(direction).upper()
+    values = [float(sl), float(tp), float(bar_open), float(bar_high), float(bar_low)]
+    if direction not in ("BUY", "SELL") or not all(np.isfinite(v) for v in values):
+        return None, None
+    sl, tp, bar_open, bar_high, bar_low = values
+
+    if direction == "BUY":
+        if bar_open <= sl:
+            return "LOSS", bar_open
+        if bar_open >= tp:
+            return "WIN", bar_open
+        if bar_low <= sl:
+            return "LOSS", sl
+        if bar_high >= tp:
+            return "WIN", tp
+    else:
+        if bar_open >= sl:
+            return "LOSS", bar_open
+        if bar_open <= tp:
+            return "WIN", bar_open
+        if bar_high >= sl:
+            return "LOSS", sl
+        if bar_low <= tp:
+            return "WIN", tp
+    return None, None
+
+
 SYMBOLS = {
     "Gold (XAU/USD)": "XAU/USD",
     "EUR/USD": "EUR/USD",
@@ -228,6 +257,11 @@ with st.sidebar:
             test_results.append(("Invalid win-rate guard", safe_accuracy_pct(5, 0) == 0.0))
             test_results.append(("BUY stop-loss precedence", trade_result_from_path(100, 95, 110, [111], [94], "BUY") == "LOSS"))
             test_results.append(("SELL stop-loss precedence", trade_result_from_path(100, 105, 90, [106], [89], "SELL") == "LOSS"))
+            test_results.append(("BUY gap-through SL fill", resolve_bar_exit("BUY", 95, 110, 94, 102, 93) == ("LOSS", 94.0)))
+            test_results.append(("SELL gap-through SL fill", resolve_bar_exit("SELL", 105, 90, 106, 107, 101) == ("LOSS", 106.0)))
+            test_results.append(("BUY gap-through TP fill", resolve_bar_exit("BUY", 95, 110, 111, 113, 109) == ("WIN", 111.0)))
+            test_results.append(("SELL gap-through TP fill", resolve_bar_exit("SELL", 105, 90, 89, 91, 87) == ("WIN", 89.0)))
+            test_results.append(("Same-candle SL-first rule", resolve_bar_exit("BUY", 95, 110, 100, 111, 94) == ("LOSS", 95.0)))
             test_results.append(("MTF 15M mapping", smart_mtf_intervals("15min") == ["1h"]))
             test_results.append(("MTF 5M mapping", smart_mtf_intervals("5min") == ["15min", "1h"]))
             for test_name, passed in test_results:
@@ -866,34 +900,11 @@ def backtest(df, min_score=6, rr=2.0, cost_r=0.05):
             bar_high = float(bar["high"])
             bar_low = float(bar["low"])
 
-            # Model opening gaps at the next available open, not at an unreachable SL/TP.
-            if direction == "BUY":
-                if bar_open <= sl:
-                    outcome, exit_price = "LOSS", bar_open
-                elif bar_open >= tp:
-                    outcome, exit_price = "WIN", bar_open
-                else:
-                    hit_sl, hit_tp = bar_low <= sl, bar_high >= tp
-                    # If both levels occur within one OHLC candle, assume SL first.
-                    if hit_sl:
-                        outcome, exit_price = "LOSS", sl
-                    elif hit_tp:
-                        outcome, exit_price = "WIN", tp
-                    else:
-                        continue
-            else:
-                if bar_open >= sl:
-                    outcome, exit_price = "LOSS", bar_open
-                elif bar_open <= tp:
-                    outcome, exit_price = "WIN", bar_open
-                else:
-                    hit_sl, hit_tp = bar_high >= sl, bar_low <= tp
-                    if hit_sl:
-                        outcome, exit_price = "LOSS", sl
-                    elif hit_tp:
-                        outcome, exit_price = "WIN", tp
-                    else:
-                        continue
+            outcome, exit_price = resolve_bar_exit(
+                direction, sl, tp, bar_open, bar_high, bar_low
+            )
+            if outcome is None:
+                continue
 
             exit_time, exit_i = bar["datetime"], j
             break
