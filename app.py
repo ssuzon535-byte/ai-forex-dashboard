@@ -1430,6 +1430,28 @@ with right:
     else:
         st.info("Not enough candles for a separate chronological holdout check; load more history.")
 
+    # Compare signal-score thresholds on the same chronological holdout.
+    # Diagnostic only; it does not automatically change live signals.
+    if len(df) - _holdout_start >= 30:
+        st.markdown("**Signal Threshold Comparison (same holdout period)**")
+        st.caption("Compares minimum scores 6, 7 and 8 on the same final 30% period. Evaluate Net R, Profit Factor, drawdown and trade count together, not win rate alone.")
+        _threshold_rows = []
+        for _threshold in (6, 7, 8):
+            _threshold_trades, _threshold_stats = backtest(
+                df, min_score=_threshold, rr=rr2, cost_r=estimated_cost_r,
+                interval=interval, start_index=_holdout_start, end_index=len(df),
+            )
+            _threshold_rows.append({
+                "Minimum score": _threshold,
+                "Closed trades": _threshold_stats["trades"],
+                "Win rate %": round(_threshold_stats["win_rate"], 1),
+                "Net R": round(_threshold_stats["net_r"], 2),
+                "Profit Factor": "infinite" if np.isinf(_threshold_stats["profit_factor"]) else round(_threshold_stats["profit_factor"], 2),
+                "Max drawdown R": round(_threshold_stats["max_drawdown_r"], 2),
+            })
+        st.dataframe(pd.DataFrame(_threshold_rows), use_container_width=True, hide_index=True)
+        st.caption("This is a threshold sensitivity check, not proof of future performance. Very small trade samples are unreliable.")
+
     if not bt_trades.empty:
         stats_df = direction_stats(bt_trades)
         st.dataframe(stats_df, use_container_width=True, hide_index=True)
