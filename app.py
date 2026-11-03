@@ -391,6 +391,27 @@ def validate_market_data(df, interval):
         problems.append("Duplicate candle timestamps detected.")
     if not df["datetime"].is_monotonic_increasing:
         problems.append("Candle timestamps are not in chronological order.")
+
+    # Report unusually large gaps between candles. Forex weekend/holiday
+    # closures can create legitimate gaps, so this is a warning, not a failure.
+    expected_minutes = {
+        "5min": 5,
+        "10min": 10,
+        "15min": 15,
+        "1h": 60,
+    }.get(interval)
+    if expected_minutes and len(df) > 1:
+        candle_times = pd.to_datetime(df["datetime"], utc=True, errors="coerce")
+        gaps = candle_times.diff().dropna().dt.total_seconds() / 60
+        unusual_gaps = gaps[gaps > expected_minutes * 3]
+        if not unusual_gaps.empty:
+            largest_gap = float(unusual_gaps.max())
+            problems.append(
+                f"{len(unusual_gaps)} unusually large candle gap(s) found; "
+                f"largest gap {largest_gap:.0f} minutes. This may be a normal "
+                "Forex market closure or missing provider data; review before trading."
+            )
+
     bad_ohlc = (df["high"] < df[["open", "close", "low"]].max(axis=1)) | (df["low"] > df[["open", "close", "high"]].min(axis=1))
     if bad_ohlc.any():
         problems.append(f"{int(bad_ohlc.sum())} candle(s) have inconsistent OHLC values.")
