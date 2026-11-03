@@ -187,8 +187,8 @@ with st.sidebar:
         "Minimum technical score",
         min_value=5,
         max_value=9,
-        value=7,
-        help="Experimental setting: start at 7 based on the current small backtest sample. Re-test on more candles and other periods; this is not a proven accuracy improvement.",
+        value=6,
+        help="Default restored to 6 so the dashboard can compare BUY and SELL samples without prematurely filtering signals. Compare direction, score and multiple periods; this does not guarantee accuracy.",
     )
 
     if st.button("🔄 Refresh market data", use_container_width=True):
@@ -961,24 +961,41 @@ def backtest(df, min_score=6, rr=2.0, cost_r=0.05):
 
 
 def direction_stats(trades_df):
+    """Compare BUY and SELL outcomes using closed trades only."""
     if trades_df.empty:
         return pd.DataFrame()
 
-    closed_all = trades_df[trades_df["result"].isin(["WIN", "LOSS"])]
+    closed_all = trades_df[trades_df["result"].isin(["WIN", "LOSS"])].copy()
     rows = []
     for direction in ["BUY", "SELL"]:
-        part = closed_all[closed_all["direction"] == direction]
-        open_count = int(((trades_df["direction"] == direction) & (trades_df["result"] == "OPEN")).sum())
+        part = closed_all[closed_all["direction"] == direction].copy()
+        open_count = int(
+            ((trades_df["direction"] == direction) & (trades_df["result"] == "OPEN")).sum()
+        )
         wins = int((part["result"] == "WIN").sum())
         losses = int((part["result"] == "LOSS").sum())
+        gross_profit = float(part.loc[part["gross_R"] > 0, "gross_R"].sum()) if not part.empty else 0.0
+        gross_loss = abs(float(part.loc[part["gross_R"] < 0, "gross_R"].sum())) if not part.empty else 0.0
+        profit_factor = (
+            gross_profit / gross_loss
+            if gross_loss > 0
+            else (np.inf if gross_profit > 0 else 0.0)
+        )
+        equity = part["R"].cumsum() if not part.empty else pd.Series(dtype=float)
+        max_drawdown = (
+            abs(float((equity - equity.cummax()).min())) if len(equity) else 0.0
+        )
         rows.append({
             "Direction": direction,
             "Closed Trades": len(part),
             "Wins": wins,
             "Losses": losses,
             "Open": open_count,
-            "Win Rate %": round(wins / len(part) * 100, 2) if len(part) else 0.0,
-            "Net R": round(float(part["R"].sum()), 2) if len(part) else 0.0,
+            "Win Rate %": round(wins / len(part) * 100, 1) if len(part) else 0.0,
+            "Gross R": round(float(part["gross_R"].sum()), 2) if not part.empty else 0.0,
+            "Net R": round(float(part["R"].sum()), 2) if not part.empty else 0.0,
+            "Profit Factor": "∞" if np.isinf(profit_factor) else round(profit_factor, 2),
+            "Max DD R": round(max_drawdown, 2),
         })
     return pd.DataFrame(rows)
 
