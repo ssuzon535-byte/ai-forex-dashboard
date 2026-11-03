@@ -797,6 +797,22 @@ def get_signal(row, df, min_score=6):
 # -----------------------------
 # Smart SL / TP
 # -----------------------------
+def valid_directional_levels(direction, entry, sl, tp):
+    """Reject malformed levels before they can appear in a live setup or backtest."""
+    try:
+        entry, sl, tp = float(entry), float(sl), float(tp)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if not all(np.isfinite(v) for v in (entry, sl, tp)):
+        return False
+    direction = str(direction).upper()
+    if direction == "BUY":
+        return sl < entry < tp
+    if direction == "SELL":
+        return tp < entry < sl
+    return False
+
+
 def build_trade(row, signal, rr1, rr2, rr3):
     direction = "BUY" if "BUY" in signal else "SELL" if "SELL" in signal else None
     if direction is None or pd.isna(row["ATR"]):
@@ -815,7 +831,7 @@ def build_trade(row, signal, rr1, rr2, rr3):
         risk = entry - sl
         if risk <= 0:
             return None
-        return {
+        trade = {
             "direction": direction,
             "entry": entry,
             "sl": sl,
@@ -824,6 +840,9 @@ def build_trade(row, signal, rr1, rr2, rr3):
             "tp3": entry + risk * rr3,
             "risk_distance": risk,
         }
+        if not all(valid_directional_levels(direction, entry, sl, trade[k]) for k in ("tp1", "tp2", "tp3")):
+            return None
+        return trade
 
     atr_sl = entry + 1.5 * atr
     swing_sl = recent_high + 0.10 * atr if np.isfinite(recent_high) else atr_sl
@@ -832,7 +851,7 @@ def build_trade(row, signal, rr1, rr2, rr3):
     if risk <= 0:
         return None
 
-    return {
+    trade = {
         "direction": direction,
         "entry": entry,
         "sl": sl,
@@ -841,6 +860,9 @@ def build_trade(row, signal, rr1, rr2, rr3):
         "tp3": entry - risk * rr3,
         "risk_distance": risk,
     }
+    if not all(valid_directional_levels(direction, entry, sl, trade[k]) for k in ("tp1", "tp2", "tp3")):
+        return None
+    return trade
 
 
 def add_trade_levels(df):
@@ -897,6 +919,10 @@ def backtest(df, min_score=6, rr=2.0, cost_r=0.05):
 
         sl = entry - risk if direction == "BUY" else entry + risk
         tp = entry + risk * rr if direction == "BUY" else entry - risk * rr
+        # Never record a trade if its SL/TP are on the wrong side of entry.
+        if not valid_directional_levels(direction, entry, sl, tp):
+            i += 1
+            continue
         outcome, exit_price, exit_time, exit_i = None, None, None, next_i
 
         for j in range(next_i, len(df)):
@@ -1207,13 +1233,19 @@ def format_price(value, symbol_name):
 def validate_trade_levels(trade_obj):
     if not trade_obj:
         return False
-    e = float(trade_obj["entry"])
-    sl = float(trade_obj["sl"])
-    tp1 = float(trade_obj["tp1"])
-    tp2 = float(trade_obj["tp2"])
-    if trade_obj["direction"] == "BUY":
-        return sl < e < tp1 <= tp2
-    return tp2 <= tp1 < e < sl
+    try:
+        e = float(trade_obj["entry"])
+        sl = float(trade_obj["sl"])
+        tp1 = float(trade_obj["tp1"])
+        tp2 = float(trade_obj["tp2"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+    direction = str(trade_obj.get("direction", "")).upper()
+    if direction == "BUY":
+        return valid_directional_levels(direction, e, sl, tp1) and valid_directional_levels(direction, e, sl, tp2) and tp1 <= tp2
+    if direction == "SELL":
+        return valid_directional_levels(direction, e, sl, tp1) and valid_directional_levels(direction, e, sl, tp2) and tp2 <= tp1
+    return False
 
 
 st.subheader("🎯 Final Trade Analysis")
