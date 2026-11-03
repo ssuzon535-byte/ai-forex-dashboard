@@ -805,7 +805,7 @@ def get_signal(row, df, min_score=6):
         signal = "WAIT"
 
     score = max(buy_score, sell_score)
-    confidence = int(round((score / max_score) * 100))
+    confluence_pct = int(round((score / max_score) * 100))
 
     reasons = []
     if row["close"] > row["EMA20"]:
@@ -838,7 +838,7 @@ def get_signal(row, df, min_score=6):
         "signal": signal,
         "score": score,
         "max_score": max_score,
-        "technical_score_pct": confidence,
+        "technical_score_pct": confluence_pct,
         "buy_score": buy_score,
         "sell_score": sell_score,
         "reasons": reasons,
@@ -1115,7 +1115,7 @@ def mtf_analysis(api_key, symbol, outputsize, main_interval):
                     "Timeframe": tf,
                     "Signal": sig["signal"],
                     "Score": f"{sig['score']}/{sig['max_score']}",
-                    "Confidence": f"{sig['technical_score_pct']}%",
+                    "Confluence": f"{sig['technical_score_pct']}%",
                     "Regime": sig["regime"],
                 }
             )
@@ -1125,7 +1125,7 @@ def mtf_analysis(api_key, symbol, outputsize, main_interval):
                     "Timeframe": tf,
                     "Signal": "ERROR",
                     "Score": "-",
-                    "Confidence": "-",
+                    "Confluence": "-",
                     "Regime": str(exc)[:45],
                 }
             )
@@ -1283,7 +1283,7 @@ col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("Price", f"{current_price:.5f}")
 col2.metric("Final Signal", final_signal)
 col3.metric("Technical Score", f"{signal_info['score']}/{signal_info['max_score']}")
-col4.metric("Technical Score %", f"{signal_info['technical_score_pct']}%")
+col4.metric("Confluence (not win probability)", f"{signal_info['technical_score_pct']}%")
 col5.metric("Regime", regime)
 
 st.caption(
@@ -1394,7 +1394,7 @@ with left:
 
 with right:
     st.subheader("📈 Historical Backtest")
-    st.caption("Win rate is the percentage of closed trades that won in this loaded sample. Technical score is not a win-probability estimate.")
+    st.caption("Historical win rate is wins divided by closed trades in this sample. Technical confluence counts matching rules; it is NOT a probability or future accuracy forecast.")
     with st.spinner("Running historical backtest..."):
         bt_trades, bt_stats = backtest(
             df,
@@ -1458,9 +1458,9 @@ with right:
         else:
             st.success("Backtest sample size is large enough for a more useful first-pass comparison (still not a guarantee of future performance).")
 
-    with st.expander("🧪 Dashboard Signal Accuracy Test", expanded=False):
-        st.caption("Reuses the current historical candles and backtest results. No extra Twelve Data API request is made.")
-        if st.button("Run Signal Accuracy Test", key="run_signal_accuracy_test"):
+    with st.expander("🧪 Historical Signal Outcome Check", expanded=False):
+        st.caption("Reports outcomes from the loaded historical sample only. It does not measure or predict future signal accuracy. No extra Twelve Data API request is made.")
+        if st.button("Run Historical Outcome Check", key="run_signal_accuracy_test"):
             if bt_trades.empty:
                 st.warning("No historical trades were generated. Try more candles or a less strict minimum score.")
             else:
