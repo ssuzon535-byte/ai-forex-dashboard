@@ -936,7 +936,7 @@ def expected_interval_minutes(interval):
     return {"5min": 5, "10min": 10, "15min": 15, "1h": 60}.get(interval)
 
 
-def backtest(df, min_score=6, rr=2.0, cost_r=0.05, interval=None):
+def backtest(df, min_score=6, rr=2.0, cost_r=0.05, interval=None, start_index=None, end_index=None):
     """Conservative non-overlapping bar-by-bar backtest with estimated costs in R."""
     try:
         rr = float(rr)
@@ -956,8 +956,14 @@ def backtest(df, min_score=6, rr=2.0, cost_r=0.05, interval=None):
         return pd.DataFrame(), empty_stats
 
     trades = []
-    i = 100
-    while i < len(df) - 1:
+    # Optional index bounds allow a chronological holdout test while preserving
+    # indicator warm-up candles that occurred before the test period.
+    start_i = max(100, int(start_index)) if start_index is not None else 100
+    stop_i = min(len(df), int(end_index)) if end_index is not None else len(df)
+    if start_i < 100 or stop_i > len(df) or stop_i <= start_i + 1:
+        return pd.DataFrame(), empty_stats
+    i = start_i
+    while i < stop_i - 1:
         row = df.iloc[i]
         result = get_signal(row, df.iloc[:i + 1], min_score=min_score)
         if result["signal"] not in ["BUY", "STRONG BUY", "SELL", "STRONG SELL"]:
@@ -999,7 +1005,7 @@ def backtest(df, min_score=6, rr=2.0, cost_r=0.05, interval=None):
             continue
         outcome, exit_price, exit_time, exit_i = None, None, None, next_i
 
-        for j in range(next_i, len(df)):
+        for j in range(next_i, stop_i):
             bar = df.iloc[j]
             bar_open = float(bar["open"])
             bar_high = float(bar["high"])
@@ -1420,6 +1426,31 @@ with right:
     )
     if bt_stats.get("open_trades", 0):
         st.info("One trade remains OPEN at the end of loaded data. It is shown in history but excluded from win rate and net R.")
+
+    # Chronological holdout: signals are only generated in the final 30% of
+    # candles. Earlier candles remain available solely for indicator warm-up.
+    _holdout_start = max(200, int(len(df) * 0.70))
+    if len(df) - _holdout_start >= 30:
+        _holdout_trades, _holdout_stats = backtest(
+            df,
+            min_score=min_score,
+            rr=rr2,
+            cost_r=estimated_cost_r,
+            interval=interval,
+            start_index=_holdout_start,
+            end_index=len(df),
+        )
+        st.markdown("**🧪 Chronological Holdout Check (final 30% of candles)**")
+        st.caption("No strategy parameters are fitted on this segment. Earlier candles are used only to warm up indicators; only signals after the split are counted. This is a first-pass holdout, not proof of future accuracy.")
+        _h1, _h2, _h3, _h4 = st.columns(4)
+        _h1.metric("Holdout closed trades", _holdout_stats["trades"])
+        _h2.metric("Holdout win rate", f"{_holdout_stats['win_rate']:.1f}%")
+        _h3.metric("Holdout Net R", f"{_holdout_stats['net_r']:.2f}R")
+        _h4.metric("Holdout Profit Factor", "∞" if np.isinf(_holdout_stats["profit_factor"]) else f"{_holdout_stats['profit_factor']:.2f}")
+        if _holdout_stats["trades"] < 20:
+            st.warning("Holdout sample is too small for a reliable conclusion. More historical candles are needed.")
+    else:
+        st.info("Not enough candles for a separate chronological holdout check; load more history.")
 
     if not bt_trades.empty:
         stats_df = direction_stats(bt_trades)
