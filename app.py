@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timezone
 
 st.set_page_config(
-    page_title="AI Forex Market Analysis V8",
+    page_title="AI Forex Market Analysis V9",
     page_icon="📊",
     layout="wide",
 )
@@ -111,10 +111,10 @@ def smart_mtf_intervals(main_interval):
     }
     return mapping.get(main_interval, ["1h"])
 
-st.title("📊 AI Forex Market Analysis V8")
+st.title("📊 AI Forex Market Analysis V9")
 st.caption(
-    "Live technical analysis + MTF confirmation + market regime + historical backtest. "
-    "Educational tool; not guaranteed financial advice."
+    "V9: validated market data + closed-candle trend analysis + gap-aware backtest. "
+    "Educational tool; historical results do not guarantee future performance."
 )
 
 # -----------------------------
@@ -657,7 +657,14 @@ def market_regime(row, df):
     if atr <= 0 or pd.isna(ema200):
         return "UNKNOWN"
 
-    recent = df.tail(20)
+    # Use only candles up to the row being evaluated. In live closed-candle
+    # mode the dataframe may also contain a newer, still-forming candle.
+    recent = df
+    try:
+        if row.name in df.index:
+            recent = df.loc[:row.name].tail(20)
+    except Exception:
+        recent = df.tail(20)
     avg_atr = recent["ATR"].mean()
     atr_ratio = atr / avg_atr if avg_atr and pd.notna(avg_atr) else 1.0
 
@@ -875,7 +882,9 @@ def build_trade(row, signal, rr1, rr2, rr3):
         swing_sl = recent_low - 0.10 * atr if np.isfinite(recent_low) else atr_sl
         sl = min(atr_sl, swing_sl)
         risk = entry - sl
-        if risk <= 0:
+        # Reject structurally distant stops instead of creating unrealistic,
+        # oversized targets from an old swing low.
+        if risk <= 0 or risk > 2.5 * atr:
             return None
         trade = {
             "direction": direction,
@@ -894,7 +903,9 @@ def build_trade(row, signal, rr1, rr2, rr3):
     swing_sl = recent_high + 0.10 * atr if np.isfinite(recent_high) else atr_sl
     sl = max(atr_sl, swing_sl)
     risk = sl - entry
-    if risk <= 0:
+    # Reject structurally distant stops instead of creating unrealistic,
+    # oversized targets from an old swing high.
+    if risk <= 0 or risk > 2.5 * atr:
         return None
 
     trade = {
@@ -921,7 +932,11 @@ def add_trade_levels(df):
 # -----------------------------
 # Backtest
 # -----------------------------
-def backtest(df, min_score=6, rr=2.0, cost_r=0.05):
+def expected_interval_minutes(interval):
+    return {"5min": 5, "10min": 10, "15min": 15, "1h": 60}.get(interval)
+
+
+def backtest(df, min_score=6, rr=2.0, cost_r=0.05, interval=None):
     """Conservative non-overlapping bar-by-bar backtest with estimated costs in R."""
     try:
         rr = float(rr)
@@ -956,6 +971,19 @@ def backtest(df, min_score=6, rr=2.0, cost_r=0.05):
 
         next_i = i + 1
         next_bar = df.iloc[next_i]
+        # Do not open a backtest position after a provider/session gap. The
+        # signal may be stale after a weekend, missing candles, or market halt.
+        expected_minutes = expected_interval_minutes(interval) if interval else None
+        if expected_minutes:
+            signal_time = pd.to_datetime(row["datetime"], utc=True, errors="coerce")
+            entry_time = pd.to_datetime(next_bar["datetime"], utc=True, errors="coerce")
+            elapsed_minutes = (
+                (entry_time - signal_time).total_seconds() / 60
+                if pd.notna(signal_time) and pd.notna(entry_time) else np.inf
+            )
+            if elapsed_minutes <= 0 or elapsed_minutes > expected_minutes * 1.5:
+                i += 1
+                continue
         entry = float(next_bar["open"])
         direction = setup["direction"]
         risk = float(setup["risk_distance"])
@@ -1373,6 +1401,7 @@ with right:
             min_score=min_score,
             rr=rr2,
             cost_r=estimated_cost_r,
+            interval=interval,
         )
 
     m1, m2, m3, m4 = st.columns(4)
