@@ -329,27 +329,21 @@ def fetch_candles(api_key, symbol, interval, outputsize):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # The request explicitly asks Twelve Data for Asia/Dhaka timestamps.
-    # If the provider returns naive timestamps, localize them to that requested
-    # timezone, then convert to UTC internally for reliable age checks/resampling.
+    # Twelve Data was explicitly asked to return Asia/Dhaka timestamps.
+    # Interpret naive timestamps using that requested timezone, not the
+    # exchange timezone metadata, then store all timestamps internally as UTC.
     meta = data.get("meta", {}) or {}
     raw_times = pd.to_datetime(df["datetime"], errors="coerce")
     if getattr(raw_times.dt, "tz", None) is None:
-        provider_tz = (
-            meta.get("timezone")
-            or meta.get("exchange_timezone")
-            or requested_timezone
-        )
         try:
             raw_times = raw_times.dt.tz_localize(
-                provider_tz, ambiguous="NaT", nonexistent="shift_forward"
+                requested_timezone, ambiguous="NaT", nonexistent="shift_forward"
             )
-        except (TypeError, ValueError):
-            # Preserve uncertainty instead of guessing UTC if timezone metadata
-            # and the explicitly requested timezone cannot be interpreted.
-            pass
-    if getattr(raw_times.dt, "tz", None) is not None:
-        raw_times = raw_times.dt.tz_convert("UTC")
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "Could not interpret provider timestamps in Asia/Dhaka timezone."
+            ) from exc
+    raw_times = raw_times.dt.tz_convert("UTC")
     df["datetime"] = raw_times
     df = (
         df.dropna(subset=required)
@@ -1056,6 +1050,7 @@ if final_signal != signal_info["signal"]:
 # -----------------------------
 current_price = float(signal_row["close"])
 price_time = signal_row["datetime"]
+price_time_display = pd.Timestamp(price_time).tz_convert("Asia/Dhaka").strftime("%Y-%m-%d %H:%M:%S %Z")
 regime = signal_info["regime"]
 
 col1, col2, col3, col4, col5 = st.columns(5)
@@ -1066,7 +1061,7 @@ col4.metric("Technical Score %", f"{signal_info['technical_score_pct']}%")
 col5.metric("Regime", regime)
 
 st.caption(
-    f"Analysis candle: {price_time} | Data refresh cache: 120 sec | "
+    f"Analysis candle (Bangladesh time): {price_time_display} | Data refresh cache: 120 sec | "
     f"Signal mode: {signal_mode}"
 )
 
@@ -1246,6 +1241,11 @@ if mtf_enabled:
 st.subheader("📉 Price + Indicators")
 
 chart_df = df.tail(min(180, len(df))).copy()
+# Plotly receives Bangladesh-local naive timestamps so chart labels/hover times
+# remain in Bangladesh time regardless of the viewer's device timezone.
+chart_df["datetime"] = (
+    chart_df["datetime"].dt.tz_convert("Asia/Dhaka").dt.tz_localize(None)
+)
 
 fig = go.Figure()
 fig.add_trace(
@@ -1307,8 +1307,13 @@ with st.expander("📊 Backtest trade history"):
             "time", "direction", "entry", "SL", "TP",
             "result", "gross_R", "cost_R", "R", "score", "regime"
         ]
+        history_display = bt_trades[display_cols].tail(100).copy()
+        if "time" in history_display.columns:
+            history_display["time"] = pd.to_datetime(
+                history_display["time"], utc=True
+            ).dt.tz_convert("Asia/Dhaka").dt.strftime("%Y-%m-%d %H:%M:%S")
         st.dataframe(
-            bt_trades[display_cols].tail(100),
+            history_display,
             use_container_width=True,
             hide_index=True,
         )
@@ -1323,8 +1328,13 @@ with st.expander("🔎 Current indicator values"):
         "RSI", "ATR", "ADX", "MACD", "MACD_signal",
         "BB_upper", "BB_mid", "BB_lower"
     ]
+    indicator_display = df[indicator_cols].tail(10).copy()
+    indicator_display["datetime"] = (
+        indicator_display["datetime"].dt.tz_convert("Asia/Dhaka")
+        .dt.strftime("%Y-%m-%d %H:%M:%S")
+    )
     st.dataframe(
-        df[indicator_cols].tail(10),
+        indicator_display,
         use_container_width=True,
         hide_index=True,
     )
@@ -1360,7 +1370,7 @@ try:
             if age_hours < -1.0:
                 st.error(
                     f"⚠️ Candle timestamp is {abs(age_hours):.1f} hours in the future "
-                    f"({latest_utc}). Check provider timezone metadata."
+                    f"({latest_utc.tz_convert('Asia/Dhaka')}). Check provider timezone metadata."
                 )
             elif age_hours > 72:
                 st.error(
