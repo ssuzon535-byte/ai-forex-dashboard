@@ -97,7 +97,6 @@ SYMBOLS = {
 INTERVALS = {
     "1H": "1h",
     "15M": "15min",
-    "10M": "10min",
     "5M": "5min",
 }
 
@@ -105,7 +104,6 @@ def smart_mtf_intervals(main_interval):
     """Return only useful higher-timeframe checks; avoid duplicate/lower TF API calls."""
     mapping = {
         "5min": ["15min", "1h"],
-        "10min": ["1h"],
         "15min": ["1h"],
         "1h": [],
     }
@@ -181,7 +179,7 @@ with st.sidebar:
         value=True,
         help="If enabled, conflicting higher-timeframe direction becomes WAIT.",
     )
-    st.caption("Smart MTF: 15M→1H, 10M→1H, 5M→15M+1H, 1H→no extra MTF request.")
+    st.caption("Smart MTF: 5M→15M+1H, 15M→1H, 1H→no extra MTF request.")
 
     min_score = st.slider(
         "Minimum technical score",
@@ -327,10 +325,8 @@ with st.sidebar:
 def fetch_candles(api_key, symbol, interval, outputsize):
     url = "https://api.twelvedata.com/time_series"
 
-    # Twelve Data does not provide a native 10-minute interval. Build 10M
-    # candles locally from 5-minute OHLC candles instead of requesting 10min.
-    request_interval = "5min" if interval == "10min" else interval
-    request_outputsize = min(int(outputsize) * 2, 5000) if interval == "10min" else int(outputsize)
+    request_interval = interval
+    request_outputsize = int(outputsize)
 
     # Request timestamps in Bangladesh local time explicitly. This makes naive
     # provider timestamps interpretable and keeps the dashboard display consistent.
@@ -410,23 +406,6 @@ def fetch_candles(api_key, symbol, interval, outputsize):
         & (df["low"] <= df[["open", "close", "high"]].min(axis=1))
     ].reset_index(drop=True)
 
-    # Aggregate only complete pairs of 5-minute candles into 10-minute bars.
-    if interval == "10min":
-        indexed = df.set_index("datetime").sort_index()
-        aggregations = {
-            "open": "first", "high": "max", "low": "min", "close": "last",
-        }
-        if "volume" in indexed.columns:
-            aggregations["volume"] = "sum"
-        grouped = indexed.resample(
-            "10min", origin="start_day", label="left", closed="left"
-        )
-        df = grouped.agg(aggregations)
-        source_count = grouped["open"].count()
-        df = df[source_count == 2].dropna(
-            subset=["open", "high", "low", "close"]
-        ).reset_index()
-
     if len(df) < 80:
         raise ValueError("Not enough valid candles returned by the data provider after cleaning.")
 
@@ -453,7 +432,6 @@ def validate_market_data(df, interval):
     # closures can create legitimate gaps, so this is a warning, not a failure.
     expected_minutes = {
         "5min": 5,
-        "10min": 10,
         "15min": 15,
         "1h": 60,
     }.get(interval)
@@ -933,7 +911,7 @@ def add_trade_levels(df):
 # Backtest
 # -----------------------------
 def expected_interval_minutes(interval):
-    return {"5min": 5, "10min": 10, "15min": 15, "1h": 60}.get(interval)
+    return {"5min": 5, "15min": 15, "1h": 60}.get(interval)
 
 
 def backtest(df, min_score=6, rr=2.0, cost_r=0.05, interval=None, start_index=None, end_index=None):
