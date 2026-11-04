@@ -1430,6 +1430,43 @@ with right:
     else:
         st.info("Not enough candles for a separate chronological holdout check; load more history.")
 
+    # Three chronological walk-forward evaluation windows. Each window is
+    # evaluated only on its own candles; earlier data is used for indicator
+    # warm-up. This exposes whether results depend on one short market regime.
+    if len(df) >= 400:
+        st.markdown("**🧭 Walk-Forward Consistency Check (3 chronological windows)**")
+        st.caption("Same fixed strategy settings in each period. This is a stability check, not parameter optimization. Fewer than 20 closed trades per window is insufficient for a useful conclusion.")
+        _wf_rows = []
+        _wf_start = max(200, int(len(df) * 0.40))
+        _wf_edges = np.linspace(_wf_start, len(df), 4, dtype=int)
+        for _wf_n in range(3):
+            _wf_a, _wf_b = int(_wf_edges[_wf_n]), int(_wf_edges[_wf_n + 1])
+            if _wf_b - _wf_a < 30:
+                continue
+            _, _wf_stats = backtest(
+                df, min_score=min_score, rr=rr2, cost_r=estimated_cost_r,
+                interval=interval, start_index=_wf_a, end_index=_wf_b,
+            )
+            _wf_rows.append({
+                "Period": f"Window {_wf_n + 1}",
+                "Candles": _wf_b - _wf_a,
+                "Closed trades": _wf_stats["trades"],
+                "Win rate %": round(_wf_stats["win_rate"], 1),
+                "Net R": round(_wf_stats["net_r"], 2),
+                "Profit Factor": "∞" if np.isinf(_wf_stats["profit_factor"]) else round(_wf_stats["profit_factor"], 2),
+                "Max DD R": round(_wf_stats["max_drawdown_r"], 2),
+            })
+        if _wf_rows:
+            st.dataframe(pd.DataFrame(_wf_rows), use_container_width=True, hide_index=True)
+            _wf_total = sum(x["Closed trades"] for x in _wf_rows)
+            _wf_positive = sum(1 for x in _wf_rows if x["Net R"] > 0)
+            if _wf_total < 30:
+                st.warning(f"Only {_wf_total} closed trades across these windows. Not enough evidence to call the strategy accurate.")
+            elif _wf_positive < 2:
+                st.warning("The strategy was not consistently profitable across the three windows. Do not treat the current settings as validated.")
+            else:
+                st.info("Review all three windows and validate on a later unseen period before considering live use.")
+
     # Compare signal-score thresholds on the same chronological holdout.
     # Diagnostic only; it does not automatically change live signals.
     if len(df) - _holdout_start >= 30:
