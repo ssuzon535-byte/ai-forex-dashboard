@@ -75,8 +75,6 @@ SYMBOLS = {
 }
 
 INTERVALS = {
-    "1H": "1h",
-    "15M": "15min",
     "5M": "5min",
 }
 
@@ -91,7 +89,7 @@ def smart_mtf_intervals(main_interval):
 
 st.title("🥇 XAUUSD Gold Market Analysis")
 st.caption(
-    "XAUUSD only: closed-candle trend analysis + signal diagnostics + gap-aware backtest. "
+    "XAUUSD only · 5M analysis · closed-candle signals · gap-aware backtest. "
     "Educational tool; historical results do not guarantee future performance."
 )
 
@@ -103,12 +101,9 @@ with st.sidebar:
     selected_name = st.selectbox("Market", list(SYMBOLS.keys()), index=0)
     symbol = SYMBOLS[selected_name]
 
-    timeframe_label = st.selectbox(
-        "Main Timeframe",
-        list(INTERVALS.keys()),
-        index=1,  # 15M default
-    )
-    interval = INTERVALS[timeframe_label]
+    st.info("Analysis timeframe: 5M only")
+    timeframe_label = "5M"
+    interval = "5min"
 
     outputsize = st.select_slider(
         "Candles to load",
@@ -148,18 +143,10 @@ with st.sidebar:
     )
 
     st.divider()
-    st.subheader("Confirmation")
-    mtf_enabled = st.checkbox(
-        "Enable MTF confirmation",
-        value=False,
-        help="Uses extra API requests. Keep off to save API credits; enable when needed.",
-    )
-    strict_mtf = st.checkbox(
-        "Strict MTF filter",
-        value=True,
-        help="If enabled, conflicting higher-timeframe direction becomes WAIT.",
-    )
-    st.caption("Smart MTF: 5M→15M+1H, 15M→1H, 1H→no extra MTF request.")
+    st.subheader("Analysis timeframe")
+    st.caption("শুধু 5M candle ব্যবহার হবে। 1H/15M বা MTF confirmation নেই।")
+    mtf_enabled = False
+    strict_mtf = False
 
     min_score = st.slider(
         "Minimum technical score",
@@ -242,8 +229,7 @@ with st.sidebar:
             test_results.append(("BUY gap-through TP fill", resolve_bar_exit("BUY", 95, 110, 111, 113, 109) == ("WIN", 111.0)))
             test_results.append(("SELL gap-through TP fill", resolve_bar_exit("SELL", 105, 90, 89, 91, 87) == ("WIN", 89.0)))
             test_results.append(("Same-candle SL-first rule", resolve_bar_exit("BUY", 95, 110, 100, 111, 94) == ("LOSS", 95.0)))
-            test_results.append(("MTF 15M mapping", smart_mtf_intervals("15min") == ["1h"]))
-            test_results.append(("MTF 5M mapping", smart_mtf_intervals("5min") == ["15min", "1h"]))
+            test_results.append(("5M-only timeframe", INTERVALS == {"5M": "5min"}))
             for test_name, passed in test_results:
                 if passed:
                     st.success(f"PASS: {test_name}")
@@ -272,7 +258,7 @@ with st.sidebar:
             batch += market_items[:batch_size - len(batch)]
         batch_symbols = dict(batch)
         with st.spinner("Testing 3 markets only..."):
-            api_results = test_twelve_data_api(api_key, batch_symbols, "15min")
+            api_results = test_twelve_data_api(api_key, batch_symbols, "5min")
         for market_name, result in api_results.items():
             if result["status"] == "OK":
                 st.success(f"✅ {market_name}: {result['message']}")
@@ -1613,17 +1599,6 @@ with right:
                 if _total_test < 30:
                     st.warning("Small sample: this is a preliminary historical result, not a reliable estimate of future win probability. Aim for 30+ closed trades and test other periods too.")
                 st.info("This test evaluates the strategy on loaded historical candles. It does not prove future accuracy and does not execute live trades.")
-
-# -----------------------------
-# MTF table
-# -----------------------------
-if mtf_enabled:
-    st.subheader("🧭 Multi-Timeframe Confirmation")
-    if not mtf_df.empty:
-        st.dataframe(mtf_df, use_container_width=True, hide_index=True)
-        st.caption(
-            "Smart MTF checks only useful higher timeframes to reduce API requests. Higher timeframe alignment is a filter, not a profit guarantee."
-        )
 
 # -----------------------------
 # Chart
