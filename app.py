@@ -98,8 +98,8 @@ st.caption(
 # -----------------------------
 with st.sidebar:
     st.header("Market Settings")
-    selected_name = st.selectbox("Market", list(SYMBOLS.keys()), index=0)
-    symbol = SYMBOLS[selected_name]
+    symbol = "XAU/USD"
+    st.info("Market: XAUUSD Gold only")
 
     st.info("Analysis timeframe: 5M only")
     timeframe_label = "5M"
@@ -243,45 +243,19 @@ with st.sidebar:
             st.error(f"Dashboard self-test could not complete: {str(exc)[:150]}")
 
     st.divider()
-    st.subheader("🔌 API Connection")
-    st.caption("To reduce API-credit usage, this test checks only 3 markets per run.")
-
-    if "api_test_offset" not in st.session_state:
-        st.session_state.api_test_offset = 0
-
-    if st.button("🧪 Test next 3 markets", use_container_width=True):
-        market_items = list(SYMBOLS.items())
-        batch_size = 3
-        start_at = st.session_state.api_test_offset % len(market_items)
-        batch = market_items[start_at:start_at + batch_size]
-        if len(batch) < batch_size:
-            batch += market_items[:batch_size - len(batch)]
-        batch_symbols = dict(batch)
-        with st.spinner("Testing 3 markets only..."):
-            api_results = test_twelve_data_api(api_key, batch_symbols, "5min")
-        for market_name, result in api_results.items():
-            if result["status"] == "OK":
-                st.success(f"✅ {market_name}: {result['message']}")
-            elif result["status"] == "RATE LIMIT":
-                st.warning(f"⏳ {market_name}: {result['message']}")
-            else:
-                st.error(f"❌ {market_name}: {result['message']}")
-
-        ok_count = sum(1 for result in api_results.values() if result["status"] == "OK")
-        rate_limited = any(result["status"] == "RATE LIMIT" for result in api_results.values())
-        error_count = sum(1 for result in api_results.values() if result["status"] == "ERROR")
-        st.divider()
-        st.markdown("**API Test Summary (this batch only)**")
-        st.write(f"Successful: {ok_count} / {len(batch_symbols)}")
-        st.write(f"Failed: {error_count}")
-        st.write(f"Not tested in this batch: {len(SYMBOLS) - len(batch_symbols)} other markets")
-        if rate_limited:
-            st.info("Rate limit reached. Stop testing and wait at least 60 seconds before trying again.")
-        if error_count:
-            st.caption("A 404 means the provider did not find that symbol/endpoint. Verify the exact symbol in Twelve Data's Commodities list; it does not automatically mean your API key is wrong.")
-        if not rate_limited:
-            st.session_state.api_test_offset = (start_at + batch_size) % len(market_items)
-            st.caption("Press the button again to test the next batch of 3 markets.")
+    st.subheader("🔌 XAUUSD API Connection")
+    if st.button("🧪 Test XAUUSD API", use_container_width=True):
+        with st.spinner("Testing XAUUSD 5M data..."):
+            api_results = test_twelve_data_api(
+                api_key, {"XAUUSD Gold": "XAU/USD"}, "5min"
+            )
+        result = api_results["XAUUSD Gold"]
+        if result["status"] == "OK":
+            st.success(f"✅ XAUUSD: {result['message']}")
+        elif result["status"] == "RATE LIMIT":
+            st.warning(f"⏳ XAUUSD: {result['message']}")
+        else:
+            st.error(f"❌ XAUUSD: {result['message']}")
 
 
 # -----------------------------
