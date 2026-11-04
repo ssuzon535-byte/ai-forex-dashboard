@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timezone
 
 st.set_page_config(
-    page_title="AI Forex Market Analysis V9",
+    page_title="XAUUSD Gold Market Analysis",
     page_icon="📊",
     layout="wide",
 )
@@ -72,26 +72,6 @@ def resolve_bar_exit(direction, sl, tp, bar_open, bar_high, bar_low):
 
 SYMBOLS = {
     "Gold (XAU/USD)": "XAU/USD",
-    "EUR/USD": "EUR/USD",
-    "GBP/USD": "GBP/USD",
-    "USD/JPY": "USD/JPY",
-    "USD/CHF": "USD/CHF",
-    "AUD/USD": "AUD/USD",
-    "NZD/USD": "NZD/USD",
-    "USD/CAD": "USD/CAD",
-    "EUR/GBP": "EUR/GBP",
-    "EUR/JPY": "EUR/JPY",
-    "EUR/AUD": "EUR/AUD",
-    "EUR/CHF": "EUR/CHF",
-    "GBP/JPY": "GBP/JPY",
-    "GBP/AUD": "GBP/AUD",
-    "GBP/CHF": "GBP/CHF",
-    "AUD/JPY": "AUD/JPY",
-    "AUD/CAD": "AUD/CAD",
-    "NZD/JPY": "NZD/JPY",
-    "CAD/JPY": "CAD/JPY",
-    "CHF/JPY": "CHF/JPY",
-    "USD/BDT": "USD/BDT",
 }
 
 INTERVALS = {
@@ -109,9 +89,9 @@ def smart_mtf_intervals(main_interval):
     }
     return mapping.get(main_interval, ["1h"])
 
-st.title("📊 AI Forex Market Analysis V9")
+st.title("🥇 XAUUSD Gold Market Analysis")
 st.caption(
-    "V9: validated market data + closed-candle trend analysis + gap-aware backtest. "
+    "XAUUSD only: closed-candle trend analysis + signal diagnostics + gap-aware backtest. "
     "Educational tool; historical results do not guarantee future performance."
 )
 
@@ -822,6 +802,18 @@ def get_signal(row, df, min_score=6, experiment=None):
         "reasons": reasons,
         "regime": regime,
         "candle": candle["label"],
+        "quality_failures": [
+            label for label, passed in [
+                ("EMA trend structure", (row["close"] > row["EMA50"] > row["EMA200"] and row["EMA20"] > row["EMA50"]) if cfg["use_ema_structure"] else True),
+                ("EMA20 slope", ema20_slope_up if buy_score >= sell_score else (ema20_slope_down if cfg["use_slope"] else True)),
+                ("RSI threshold", row["RSI"] > (cfg["rsi_buy"] - 2.0) if buy_score >= sell_score else row["RSI"] < (cfg["rsi_sell"] + 2.0)),
+                ("MACD direction", row["MACD"] > row["MACD_signal"] if buy_score >= sell_score else row["MACD"] < row["MACD_signal"]),
+                ("ADX strength", row["ADX"] >= cfg["adx_gate"]),
+                ("Directional DI", (di_valid and (plus_di_value > minus_di_value if buy_score >= sell_score else minus_di_value > plus_di_value)) if cfg["use_di"] else True),
+                ("Not overextended", extension_atr <= cfg["extension_atr"]),
+                ("Trend regime", regime in (["UPTREND", "STRONG UPTREND"] if buy_score >= sell_score else ["DOWNTREND", "STRONG DOWNTREND"])),
+            ] if not passed
+        ],
     }
 
 
@@ -1375,6 +1367,11 @@ with left:
         "MTF": mtf_status,
     }
     st.table(pd.DataFrame(list(factors.items()), columns=["Factor", "Status"]))
+
+    if signal_info.get("signal") == "WAIT" and signal_info.get("quality_failures"):
+        st.warning("WAIT কারণ: " + " · ".join(signal_info["quality_failures"]))
+    elif signal_info.get("signal") == "WAIT":
+        st.info("WAIT: Technical score বা BUY/SELL direction-এর শর্ত পূরণ হয়নি.")
 
 with right:
     st.subheader("📈 Historical Backtest")
