@@ -115,8 +115,9 @@ with st.sidebar:
 
     signal_mode = st.radio(
         "Signal mode",
-        ["Closed candle (stable)", "Live candle (faster)"],
-        index=1,
+        ["Closed candle (stable)", "Live candle (provisional)"],
+        index=0,
+        help="Default uses the last completed 5M candle to avoid signals changing inside an unfinished candle.",
     )
 
     st.divider()
@@ -694,6 +695,34 @@ def get_signal(row, df, min_score=6, experiment=None):
     minus_di_value = float(row.get("MINUS_DI", np.nan))
     di_valid = np.isfinite(plus_di_value) and np.isfinite(minus_di_value)
 
+    # Pullback/rejection entry: within the previous three completed candles,
+    # price must have returned close to EMA20. The current candle must then
+    # close back on the trend side with directional candle confirmation.
+    pullback_buy = False
+    pullback_sell = False
+    try:
+        row_pos = df.index.get_loc(row.name)
+        prior_bars = df.iloc[max(0, row_pos - 3):row_pos]
+        if not prior_bars.empty:
+            prior_atr = prior_bars["ATR"].replace(0, np.nan)
+            buy_touched = (
+                prior_bars["low"] <= prior_bars["EMA20"] + 0.20 * prior_atr
+            ).any()
+            sell_touched = (
+                prior_bars["high"] >= prior_bars["EMA20"] - 0.20 * prior_atr
+            ).any()
+            pullback_buy = bool(
+                buy_touched and row["close"] > row["EMA20"]
+                and candle["bull"] and not candle["doji"]
+            )
+            pullback_sell = bool(
+                sell_touched and row["close"] < row["EMA20"]
+                and candle["bear"] and not candle["doji"]
+            )
+    except (KeyError, TypeError, ValueError, IndexError):
+        pullback_buy = False
+        pullback_sell = False
+
     buy_quality = (
         (row["close"] > row["EMA50"] > row["EMA200"] and row["EMA20"] > row["EMA50"] if cfg["use_ema_structure"] else True)
         and (ema20_slope_up if cfg["use_slope"] else True)
@@ -703,6 +732,7 @@ def get_signal(row, df, min_score=6, experiment=None):
         and ((di_valid and plus_di_value > minus_di_value) if cfg["use_di"] else True)
         and extension_atr <= cfg["extension_atr"]
         and regime in ["UPTREND", "STRONG UPTREND"]
+        and pullback_buy
     )
     sell_quality = (
         (row["close"] < row["EMA50"] < row["EMA200"] and row["EMA20"] < row["EMA50"] if cfg["use_ema_structure"] else True)
@@ -713,6 +743,7 @@ def get_signal(row, df, min_score=6, experiment=None):
         and ((di_valid and minus_di_value > plus_di_value) if cfg["use_di"] else True)
         and extension_atr <= cfg["extension_atr"]
         and regime in ["DOWNTREND", "STRONG DOWNTREND"]
+        and pullback_sell
     )
 
     # A high score alone is not enough if the directional quality gate fails.
@@ -803,6 +834,7 @@ def get_signal(row, df, min_score=6, experiment=None):
                 ("Directional DI", preferred_di_ok),
                 ("Not overextended", extension_atr <= cfg["extension_atr"]),
                 ("Trend regime", preferred_regime_ok),
+                ("EMA20 pullback and rejection", pullback_buy if preferred_is_buy else pullback_sell),
             ] if not passed
         ],
     }
