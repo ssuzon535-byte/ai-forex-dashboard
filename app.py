@@ -792,6 +792,36 @@ def get_signal(row, df, min_score=6, experiment=None):
     if candle["label"]:
         reasons.append(candle["label"])
 
+    preferred_is_buy = buy_score >= sell_score
+    preferred_structure_ok = (
+        (row["close"] > row["EMA50"] and row["EMA20"] > row["EMA50"] > row["EMA200"])
+        if preferred_is_buy
+        else (row["close"] < row["EMA50"] and row["EMA20"] < row["EMA50"] < row["EMA200"])
+    )
+    preferred_slope_ok = (
+        ema20_slope_up if preferred_is_buy else ema20_slope_down
+    ) if cfg["use_slope"] else True
+    preferred_rsi_ok = (
+        row["RSI"] > (cfg["rsi_buy"] - 2.0)
+        if preferred_is_buy
+        else row["RSI"] < (cfg["rsi_sell"] + 2.0)
+    )
+    preferred_macd_ok = (
+        row["MACD"] > row["MACD_signal"]
+        if preferred_is_buy
+        else row["MACD"] < row["MACD_signal"]
+    )
+    preferred_di_ok = (
+        (di_valid and plus_di_value > minus_di_value)
+        if preferred_is_buy
+        else (di_valid and minus_di_value > plus_di_value)
+    ) if cfg["use_di"] else True
+    preferred_regime_ok = regime in (
+        ["UPTREND", "STRONG UPTREND"]
+        if preferred_is_buy
+        else ["DOWNTREND", "STRONG DOWNTREND"]
+    )
+
     return {
         "signal": signal,
         "score": score,
@@ -804,14 +834,14 @@ def get_signal(row, df, min_score=6, experiment=None):
         "candle": candle["label"],
         "quality_failures": [
             label for label, passed in [
-                ("EMA trend structure", (row["close"] > row["EMA50"] > row["EMA200"] and row["EMA20"] > row["EMA50"]) if cfg["use_ema_structure"] else True),
-                ("EMA20 slope", ema20_slope_up if buy_score >= sell_score else (ema20_slope_down if cfg["use_slope"] else True)),
-                ("RSI threshold", row["RSI"] > (cfg["rsi_buy"] - 2.0) if buy_score >= sell_score else row["RSI"] < (cfg["rsi_sell"] + 2.0)),
-                ("MACD direction", row["MACD"] > row["MACD_signal"] if buy_score >= sell_score else row["MACD"] < row["MACD_signal"]),
+                ("EMA trend structure", preferred_structure_ok if cfg["use_ema_structure"] else True),
+                ("EMA20 slope", preferred_slope_ok),
+                ("RSI threshold", preferred_rsi_ok),
+                ("MACD direction", preferred_macd_ok),
                 ("ADX strength", row["ADX"] >= cfg["adx_gate"]),
-                ("Directional DI", (di_valid and (plus_di_value > minus_di_value if buy_score >= sell_score else minus_di_value > plus_di_value)) if cfg["use_di"] else True),
+                ("Directional DI", preferred_di_ok),
                 ("Not overextended", extension_atr <= cfg["extension_atr"]),
-                ("Trend regime", regime in (["UPTREND", "STRONG UPTREND"] if buy_score >= sell_score else ["DOWNTREND", "STRONG DOWNTREND"])),
+                ("Trend regime", preferred_regime_ok),
             ] if not passed
         ],
     }
