@@ -3,6 +3,7 @@ import requests
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+from streamlit_autorefresh import st_autorefresh
 from datetime import datetime, timezone
 
 st.set_page_config(
@@ -87,7 +88,7 @@ def smart_mtf_intervals(main_interval):
     }
     return mapping.get(main_interval, ["1h"])
 
-st.title("🥇 XAUUSD Gold Market Analysis")
+st.title("🥇 XAUUSD Gold Live Analysis")
 st.caption(
     "XAUUSD only · 5M analysis · closed-candle signals · gap-aware backtest. "
     "Educational tool; historical results do not guarantee future performance."
@@ -115,7 +116,7 @@ with st.sidebar:
     signal_mode = st.radio(
         "Signal mode",
         ["Closed candle (stable)", "Live candle (faster)"],
-        index=0,
+        index=1,
     )
 
     st.divider()
@@ -261,7 +262,7 @@ with st.sidebar:
 # -----------------------------
 # Data
 # -----------------------------
-@st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=55, show_spinner=False)
 def fetch_candles(api_key, symbol, interval, outputsize):
     url = "https://api.twelvedata.com/time_series"
 
@@ -1126,6 +1127,11 @@ def mtf_direction(mtf_df):
 
 
 # -----------------------------
+# Live refresh
+# -----------------------------
+refresh_count = st_autorefresh(interval=60 * 1000, limit=None, key="xauusd_live_refresh")
+
+# -----------------------------
 # Load main data
 # -----------------------------
 try:
@@ -1245,18 +1251,30 @@ price_time = signal_row["datetime"]
 price_time_display = pd.Timestamp(price_time).tz_convert("Asia/Dhaka").strftime("%Y-%m-%d %H:%M:%S %Z")
 regime = signal_info["regime"]
 
-col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("Price", f"{current_price:.5f}")
+live_now = pd.Timestamp.now(tz="Asia/Dhaka")
+candle_open_time = pd.Timestamp(df.iloc[-1]["datetime"]).tz_convert("Asia/Dhaka")
+next_candle_time = candle_open_time + pd.Timedelta(minutes=5)
+seconds_to_close = max(0, int((next_candle_time - live_now).total_seconds()))
+countdown_text = f"{seconds_to_close // 60:02d}:{seconds_to_close % 60:02d}"
+
+col1, col2, col3, col4, col5, col6 = st.columns(6)
+col1.metric("Live Price", f"{float(df.iloc[-1]['close']):.5f}")
+col2.metric("Signal", final_signal)
+col3.metric("Technical Score", f"{signal_info['score']}/{signal_info['max_score']}")
+col4.metric("Confluence", f"{signal_info['technical_score_pct']}%")
+col5.metric("Market Regime", regime)
+col6.metric("Bangladesh Time", live_now.strftime("%H:%M:%S"))
 col2.metric("Final Signal", final_signal)
 col3.metric("Technical Score", f"{signal_info['score']}/{signal_info['max_score']}")
 col4.metric("Confluence (not win probability)", f"{signal_info['technical_score_pct']}%")
 col5.metric("Regime", regime)
 
 st.caption(
-    f"Analysis candle (Bangladesh time): {price_time_display} | Data refresh cache: 120 sec | "
-    f"Signal mode: {signal_mode} | "
-    + ("Entry reference: next candle open" if signal_mode == "Closed candle (stable)" else "Entry reference: live candle close (provisional)")
+    f"Current 5M candle: {candle_open_time.strftime('%Y-%m-%d %H:%M:%S')} BD time | "
+    f"Next candle in: {countdown_text} | Auto-refresh: 60 sec | "
+    f"Last analysis candle: {price_time_display} | Mode: {signal_mode}"
 )
+st.info("Live candle signal provisional. Candle close হওয়ার আগে BUY/SELL/WAIT বদলাতে পারে। Stable signal চাইলে sidebar থেকে Closed candle mode নাও।")
 
 # -----------------------------
 # Final setup card
@@ -1577,7 +1595,7 @@ with right:
 # -----------------------------
 # Chart
 # -----------------------------
-st.subheader("📉 Price + Indicators")
+st.subheader("📉 Live XAUUSD 5M Candlestick Chart")
 
 chart_df = df.tail(min(180, len(df))).copy()
 # Normalize chart inputs explicitly and discard rows Plotly cannot render.
