@@ -152,9 +152,9 @@ with st.sidebar:
 
     min_score = st.slider(
         "Minimum technical score",
-        min_value=5,
-        max_value=9,
-        value=6,
+        min_value=3,
+        max_value=5,
+        value=3,
         help="Default restored to 6 so the dashboard can compare BUY and SELL samples without prematurely filtering signals. Compare direction, score and multiple periods; this does not guarantee accuracy.",
     )
 
@@ -567,277 +567,93 @@ def candle_confirmation(row, previous_row=None):
 # Market regime
 # -----------------------------
 def market_regime(row, df):
-    atr = float(row["ATR"]) if pd.notna(row["ATR"]) else 0.0
-    adx = float(row["ADX"]) if pd.notna(row["ADX"]) else 0.0
-    ema20 = row["EMA20"]
-    ema50 = row["EMA50"]
-    ema200 = row["EMA200"]
-    close = row["close"]
-
-    if atr <= 0 or pd.isna(ema200):
-        return "UNKNOWN"
-
-    # Use only candles up to the row being evaluated. In live closed-candle
-    # mode the dataframe may also contain a newer, still-forming candle.
-    recent = df
+    """Describe structure using only candles available at this point."""
     try:
-        if row.name in df.index:
-            recent = df.loc[:row.name].tail(20)
+        pos = df.index.get_loc(row.name)
+        history = df.iloc[max(0, pos - 19):pos]
+        if len(history) < 8: return "BUILDING STRUCTURE"
+        prior_high, prior_low = float(history["high"].max()), float(history["low"].min())
+        close, atr = float(row["close"]), float(row.get("ATR", 0) or 0)
+        if atr <= 0: return "RANGE"
+        if close > prior_high: return "BULLISH BOS"
+        if close < prior_low: return "BEARISH BOS"
+        if prior_high - prior_low <= atr * 3: return "RANGE / CONSOLIDATION"
+        return "STRUCTURE FORMING"
     except Exception:
-        recent = df.tail(20)
-    avg_atr = recent["ATR"].mean()
-    atr_ratio = atr / avg_atr if avg_atr and pd.notna(avg_atr) else 1.0
-
-    if adx >= 25 and close > ema20 > ema50 > ema200:
-        return "STRONG UPTREND"
-    if adx >= 25 and close < ema20 < ema50 < ema200:
-        return "STRONG DOWNTREND"
-
-    if adx >= 18 and close > ema50 and ema20 > ema50:
-        return "UPTREND"
-    if adx >= 18 and close < ema50 and ema20 < ema50:
-        return "DOWNTREND"
-
-    if adx < 15 and 0.75 <= atr_ratio <= 1.35:
-        return "CHOPPY / RANGE"
-
-    if atr_ratio >= 1.50:
-        return "HIGH VOLATILITY"
-
-    return "MIXED"
+        return "STRUCTURE UNKNOWN"
 
 
 # -----------------------------
 # Signal engine
 # -----------------------------
-def get_signal(row, df, min_score=6, experiment=None):
-    cfg = {"rsi_buy":52.0,"rsi_sell":48.0,"adx_score":18.0,"adx_gate":20.0,"extension_atr":1.25,"use_candle":True,"use_di":True,"use_slope":True,"use_ema_structure":True}
-    if experiment: cfg.update(experiment)
-    required = [
-        "close", "EMA20", "EMA50", "EMA200",
-        "RSI", "MACD", "MACD_signal", "ADX",
-        "ATR", "BB_upper", "BB_lower"
-    ]
-    if any(pd.isna(row.get(c)) for c in required):
-        return {
-            "signal": "WAIT",
-            "score": 0,
-            "max_score": 9,
-            "technical_score_pct": 0,
-            "buy_score": 0,
-            "sell_score": 0,
-            "reasons": [],
-            "regime": "UNKNOWN",
-            "candle": "Unknown",
-        }
-
-    previous_row = None
+def get_signal(row, df, min_score=3, experiment=None):
+    """Five-factor XAUUSD 5M engine: price action, liquidity, structure, zones, volume."""
+    empty = {"signal":"WAIT","score":0,"max_score":5,"technical_score_pct":0,
+             "buy_score":0,"sell_score":0,"reasons":[],"regime":"STRUCTURE UNKNOWN",
+             "candle":"Unknown","quality_failures":[]}
     try:
-        # In the dashboard and backtest, df contains candles up to this row.
-        if len(df) >= 2 and df.index[-1] == row.name:
-            previous_row = df.iloc[-2]
-        elif row.name in df.index:
-            row_pos = df.index.get_loc(row.name)
-            if isinstance(row_pos, (int, np.integer)) and row_pos > 0:
-                previous_row = df.iloc[row_pos - 1]
-    except Exception:
-        previous_row = None
-
-    candle = candle_confirmation(row, previous_row)
-    regime = market_regime(row, df)
-
-    buy_checks = [
-        bool(row["close"] > row["EMA20"]),
-        bool(row["EMA20"] > row["EMA50"]),
-        bool(row["EMA50"] > row["EMA200"]),
-        bool(row["RSI"] > cfg["rsi_buy"]),
-        bool(row["MACD"] > row["MACD_signal"]),
-        bool(row["ADX"] >= cfg["adx_score"]),
-        bool((candle["bull"] and not candle["doji"]) if cfg["use_candle"] else True),
-        bool(row["close"] > row["BB_mid"]),
-        bool(regime in ["UPTREND", "STRONG UPTREND"]),
-    ]
-
-    sell_checks = [
-        bool(row["close"] < row["EMA20"]),
-        bool(row["EMA20"] < row["EMA50"]),
-        bool(row["EMA50"] < row["EMA200"]),
-        bool(row["RSI"] < cfg["rsi_sell"]),
-        bool(row["MACD"] < row["MACD_signal"]),
-        bool(row["ADX"] >= cfg["adx_score"]),
-        bool((candle["bear"] and not candle["doji"]) if cfg["use_candle"] else True),
-        bool(row["close"] < row["BB_mid"]),
-        bool(regime in ["DOWNTREND", "STRONG DOWNTREND"]),
-    ]
-
-    buy_score = int(sum(buy_checks))
-    sell_score = int(sum(sell_checks))
-    max_score = len(buy_checks)
-
-    # Quality gate: require trend alignment before allowing a scored signal.
-    # This intentionally reduces signal frequency to avoid counter-trend entries.
-    # V8 quality gate: require directional trend structure, DI agreement,
-    # positive/negative EMA20 slope, and avoid chasing an overextended candle.
-    # These are filters, not a claim of a particular future win probability.
-    prior_ema20 = (
-        float(previous_row["EMA20"])
-        if previous_row is not None and pd.notna(previous_row.get("EMA20"))
-        else float(row["EMA20"])
-    )
-    ema20_slope_up = float(row["EMA20"]) > prior_ema20
-    ema20_slope_down = float(row["EMA20"]) < prior_ema20
-    atr_value = float(row["ATR"])
-    extension_atr = (
-        abs(float(row["close"]) - float(row["EMA20"])) / atr_value
-        if atr_value > 0 else np.inf
-    )
-    plus_di_value = float(row.get("PLUS_DI", np.nan))
-    minus_di_value = float(row.get("MINUS_DI", np.nan))
-    di_valid = np.isfinite(plus_di_value) and np.isfinite(minus_di_value)
-
-    # Pullback/rejection entry: within the previous three completed candles,
-    # price must have returned close to EMA20. The current candle must then
-    # close back on the trend side with directional candle confirmation.
-    pullback_buy = False
-    pullback_sell = False
-    try:
-        row_pos = df.index.get_loc(row.name)
-        prior_bars = df.iloc[max(0, row_pos - 3):row_pos]
-        if not prior_bars.empty:
-            prior_atr = prior_bars["ATR"].replace(0, np.nan)
-            buy_touched = (
-                prior_bars["low"] <= prior_bars["EMA20"] + 0.20 * prior_atr
-            ).any()
-            sell_touched = (
-                prior_bars["high"] >= prior_bars["EMA20"] - 0.20 * prior_atr
-            ).any()
-            pullback_buy = bool(
-                buy_touched and row["close"] > row["EMA20"]
-                and candle["bull"] and not candle["doji"]
-            )
-            pullback_sell = bool(
-                sell_touched and row["close"] < row["EMA20"]
-                and candle["bear"] and not candle["doji"]
-            )
-    except (KeyError, TypeError, ValueError, IndexError):
-        pullback_buy = False
-        pullback_sell = False
-
-    buy_quality = (
-        (row["close"] > row["EMA50"] > row["EMA200"] and row["EMA20"] > row["EMA50"] if cfg["use_ema_structure"] else True)
-        and (ema20_slope_up if cfg["use_slope"] else True)
-        and row["RSI"] > (cfg["rsi_buy"] - 2.0)
-        and row["MACD"] > row["MACD_signal"]
-        and row["ADX"] >= cfg["adx_gate"]
-        and ((di_valid and plus_di_value > minus_di_value) if cfg["use_di"] else True)
-        and extension_atr <= cfg["extension_atr"]
-        and regime in ["UPTREND", "STRONG UPTREND"]
-        and pullback_buy
-    )
-    sell_quality = (
-        (row["close"] < row["EMA50"] < row["EMA200"] and row["EMA20"] < row["EMA50"] if cfg["use_ema_structure"] else True)
-        and (ema20_slope_down if cfg["use_slope"] else True)
-        and row["RSI"] < (cfg["rsi_sell"] + 2.0)
-        and row["MACD"] < row["MACD_signal"]
-        and row["ADX"] >= cfg["adx_gate"]
-        and ((di_valid and minus_di_value > plus_di_value) if cfg["use_di"] else True)
-        and extension_atr <= cfg["extension_atr"]
-        and regime in ["DOWNTREND", "STRONG DOWNTREND"]
-        and pullback_sell
-    )
-
-    # A high score alone is not enough if the directional quality gate fails.
-    if buy_score >= min_score and buy_score > sell_score and buy_quality:
-        signal = "STRONG BUY" if buy_score >= 8 else "BUY"
-    elif sell_score >= min_score and sell_score > buy_score and sell_quality:
-        signal = "STRONG SELL" if sell_score >= 8 else "SELL"
-    else:
-        signal = "WAIT"
-
-    score = max(buy_score, sell_score)
-    confluence_pct = int(round((score / max_score) * 100))
-
-    reasons = []
-    if row["close"] > row["EMA20"]:
-        reasons.append("Price above EMA20")
-    elif row["close"] < row["EMA20"]:
-        reasons.append("Price below EMA20")
-
-    if row["EMA20"] > row["EMA50"] > row["EMA200"]:
-        reasons.append("Bullish EMA structure")
-    elif row["EMA20"] < row["EMA50"] < row["EMA200"]:
-        reasons.append("Bearish EMA structure")
-
-    if row["RSI"] > 52:
-        reasons.append("RSI bullish")
-    elif row["RSI"] < 48:
-        reasons.append("RSI bearish")
-
-    if row["MACD"] > row["MACD_signal"]:
-        reasons.append("MACD bullish")
-    elif row["MACD"] < row["MACD_signal"]:
-        reasons.append("MACD bearish")
-
-    if row["ADX"] >= 18:
-        reasons.append(f"ADX {row['ADX']:.1f}")
-
-    if candle["label"]:
-        reasons.append(candle["label"])
-
-    preferred_is_buy = buy_score >= sell_score
-    preferred_structure_ok = (
-        (row["close"] > row["EMA50"] and row["EMA20"] > row["EMA50"] > row["EMA200"])
-        if preferred_is_buy
-        else (row["close"] < row["EMA50"] and row["EMA20"] < row["EMA50"] < row["EMA200"])
-    )
-    preferred_slope_ok = (
-        ema20_slope_up if preferred_is_buy else ema20_slope_down
-    ) if cfg["use_slope"] else True
-    preferred_rsi_ok = (
-        row["RSI"] > (cfg["rsi_buy"] - 2.0)
-        if preferred_is_buy
-        else row["RSI"] < (cfg["rsi_sell"] + 2.0)
-    )
-    preferred_macd_ok = (
-        row["MACD"] > row["MACD_signal"]
-        if preferred_is_buy
-        else row["MACD"] < row["MACD_signal"]
-    )
-    preferred_di_ok = (
-        (di_valid and plus_di_value > minus_di_value)
-        if preferred_is_buy
-        else (di_valid and minus_di_value > plus_di_value)
-    ) if cfg["use_di"] else True
-    preferred_regime_ok = regime in (
-        ["UPTREND", "STRONG UPTREND"]
-        if preferred_is_buy
-        else ["DOWNTREND", "STRONG DOWNTREND"]
-    )
-
-    return {
-        "signal": signal,
-        "score": score,
-        "max_score": max_score,
-        "technical_score_pct": confluence_pct,
-        "buy_score": buy_score,
-        "sell_score": sell_score,
-        "reasons": reasons,
-        "regime": regime,
-        "candle": candle["label"],
-        "quality_failures": [
-            label for label, passed in [
-                ("EMA trend structure", preferred_structure_ok if cfg["use_ema_structure"] else True),
-                ("EMA20 slope", preferred_slope_ok),
-                ("RSI threshold", preferred_rsi_ok),
-                ("MACD direction", preferred_macd_ok),
-                ("ADX strength", row["ADX"] >= cfg["adx_gate"]),
-                ("Directional DI", preferred_di_ok),
-                ("Not overextended", extension_atr <= cfg["extension_atr"]),
-                ("Trend regime", preferred_regime_ok),
-                ("EMA20 pullback and rejection", pullback_buy if preferred_is_buy else pullback_sell),
-            ] if not passed
-        ],
-    }
+        if any(k not in row.index or pd.isna(row[k]) for k in ["open","high","low","close","ATR"]):
+            return empty
+        pos = df.index.get_loc(row.name)
+        if not isinstance(pos, (int, np.integer)) or pos < 20: return empty
+        history = df.iloc[:pos]
+        recent10, recent20 = history.tail(10), history.tail(20)
+        o,h,l,c = [float(row[k]) for k in ("open","high","low","close")]
+        atr = float(row["ATR"])
+        if not np.isfinite(atr) or atr <= 0: return empty
+        prev_high, prev_low = float(recent10["high"].max()), float(recent10["low"].min())
+        swing_high, swing_low = float(recent20["high"].max()), float(recent20["low"].min())
+        rng=max(h-l,1e-12); body=abs(c-o)
+        upper=h-max(o,c); lower=min(o,c)-l
+        bull_rejection = c>o and (lower>=body*0.8 or body/rng>=0.55)
+        bear_rejection = c<o and (upper>=body*0.8 or body/rng>=0.55)
+        buy_sweep = l<prev_low and c>prev_low
+        sell_sweep = h>prev_high and c<prev_high
+        buy_bos, sell_bos = c>swing_high, c<swing_low
+        regime=market_regime(row,df)
+        demand=recent20.loc[recent20["low"].idxmin()]
+        supply=recent20.loc[recent20["high"].idxmax()]
+        demand_low=float(demand["low"]); demand_high=max(float(demand["open"]),float(demand["close"]))
+        supply_low=min(float(supply["open"]),float(supply["close"])); supply_high=float(supply["high"])
+        buy_zone=l<=demand_high+0.25*atr and c>=demand_low
+        sell_zone=h>=supply_low-0.25*atr and c<=supply_high
+        volume_available=("volume" in df.columns and history["volume"].notna().sum()>=10
+                          and pd.notna(row.get("volume")))
+        volume_spike=False
+        if volume_available:
+            avg=float(history["volume"].tail(20).mean())
+            volume_spike=avg>0 and float(row["volume"])>=1.5*avg
+        buy_checks={"Price action rejection / breakout":bool(bull_rejection or buy_bos),
+                    "Liquidity sweep":bool(buy_sweep),
+                    "Market structure BOS / CHOCH":bool(buy_bos or (buy_sweep and c>float(history.iloc[-1]["close"]))),
+                    "Demand zone reaction":bool(buy_zone)}
+        sell_checks={"Price action rejection / breakout":bool(bear_rejection or sell_bos),
+                     "Liquidity sweep":bool(sell_sweep),
+                     "Market structure BOS / CHOCH":bool(sell_bos or (sell_sweep and c<float(history.iloc[-1]["close"]))),
+                     "Supply zone reaction":bool(sell_zone)}
+        if volume_available:
+            buy_checks["Volume spike confirmation"]=bool(volume_spike and c>o)
+            sell_checks["Volume spike confirmation"]=bool(volume_spike and c<o)
+        buy_score=sum(buy_checks.values()); sell_score=sum(sell_checks.values())
+        max_score=len(buy_checks); threshold=max(3,min(int(min_score),max_score))
+        if buy_score>=threshold and buy_score>sell_score and (buy_sweep or buy_bos) and bull_rejection:
+            signal="STRONG BUY" if buy_score>=max_score-1 else "BUY"
+        elif sell_score>=threshold and sell_score>buy_score and (sell_sweep or sell_bos) and bear_rejection:
+            signal="STRONG SELL" if sell_score>=max_score-1 else "SELL"
+        else: signal="WAIT"
+        preferred_buy=buy_score>=sell_score
+        selected=buy_checks if signal.endswith("BUY") else sell_checks if signal.endswith("SELL") else (buy_checks if preferred_buy else sell_checks)
+        reasons=[name for name,passed in selected.items() if passed]
+        if not volume_available: reasons.append("Volume unavailable; volume factor omitted")
+        candle="Bullish rejection" if bull_rejection else "Bearish rejection" if bear_rejection else "No strong rejection"
+        score=max(buy_score,sell_score)
+        return {"signal":signal,"score":int(score),"max_score":max_score,
+                "technical_score_pct":int(round(score/max_score*100)) if max_score else 0,
+                "buy_score":int(buy_score),"sell_score":int(sell_score),"reasons":reasons,
+                "regime":regime,"candle":candle,
+                "quality_failures":[name for name,passed in selected.items() if not passed]}
+    except (KeyError,TypeError,ValueError,IndexError,ZeroDivisionError):
+        return empty
 
 
 # -----------------------------
@@ -1510,7 +1326,7 @@ with right:
         st.markdown("**Signal Threshold Comparison (same holdout period)**")
         st.caption("Compares minimum scores 6, 7 and 8 on the same final 30% period. Evaluate Net R, Profit Factor, drawdown and trade count together, not win rate alone.")
         _threshold_rows = []
-        for _threshold in (6, 7, 8):
+        for _threshold in (3, 4, 5):
             _threshold_trades, _threshold_stats = backtest(
                 df, min_score=_threshold, rr=rr2, cost_r=estimated_cost_r,
                 interval=interval, start_index=_holdout_start, end_index=len(df),
@@ -1532,8 +1348,7 @@ with right:
             st.caption("One factor changes per row. Compare Net R, Profit Factor, drawdown and trade count, not win rate alone. Diagnostic only; live settings remain unchanged.")
             _experiment_cases = [
                 ("Baseline", min_score, rr2, {}),
-                ("Minimum score 5", 5, rr2, {}), ("Minimum score 7", 7, rr2, {}),
-                ("Minimum score 8", 8, rr2, {}), ("Minimum score 9", 9, rr2, {}),
+                ("Minimum score 4", 4, rr2, {}), ("Minimum score 5", 5, rr2, {}),
                 ("RSI 50/50", min_score, rr2, {"rsi_buy":50.0,"rsi_sell":50.0}),
                 ("RSI 55/45", min_score, rr2, {"rsi_buy":55.0,"rsi_sell":45.0}),
                 ("ADX 18", min_score, rr2, {"adx_score":18.0,"adx_gate":18.0}),
@@ -1565,7 +1380,7 @@ with right:
         # Score-wise report: closed outcomes only; OPEN trades are counted separately.
         st.markdown("**📊 Score-wise Backtest Report**")
         _score_rows = []
-        for _score_value in range(5, 10):
+        for _score_value in range(1, 6):
             _score_part = bt_trades[bt_trades["score"] == _score_value]
             _score_closed = _score_part[_score_part["result"].isin(["WIN", "LOSS"])]
             _score_wins = int((_score_closed["result"] == "WIN").sum())
