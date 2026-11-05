@@ -152,10 +152,10 @@ with st.sidebar:
 
     min_score = st.slider(
         "Minimum technical score",
-        min_value=3,
-        max_value=5,
-        value=3,
-        help="Minimum confluence required out of the available factors. Volume is omitted when the data provider does not supply it.",
+        min_value=2,
+        max_value=4,
+        value=2,
+        help="2 = more setups, 3 = balanced, 4 = very selective. A signal still needs a price-action or liquidity trigger.",
     )
 
     if st.button("🔄 Refresh market data", use_container_width=True):
@@ -708,7 +708,7 @@ def get_signal(row, df, min_score=3, experiment=None):
         buy_score = sum(buy_checks.values())
         sell_score = sum(sell_checks.values())
         max_score = len(buy_checks)
-        threshold = max(3, min(int(min_score), max_score))
+        threshold = max(2, min(int(min_score), max_score))
 
         # A setup needs confluence plus at least one actual price-action/liquidity trigger.
         buy_trigger = buy_price_action or buy_sweep
@@ -1242,6 +1242,18 @@ st.caption(
     f"Next candle in: {countdown_text} | Auto-refresh: 60 sec | "
     f"Last analysis candle: {price_time_display} | Mode: {signal_mode}"
 )
+
+with st.expander("🔎 কেন BUY/SELL আসছে না? (Signal diagnostics)", expanded=(final_signal == "WAIT")):
+    _d1, _d2, _d3 = st.columns(3)
+    _d1.metric("BUY score", f"{signal_info.get('buy_score', 0)}/{signal_info.get('max_score', 0)}")
+    _d2.metric("SELL score", f"{signal_info.get('sell_score', 0)}/{signal_info.get('max_score', 0)}")
+    _d3.metric("Required score", str(min_score))
+    st.write("BUY/SELL পেতে অন্তত ২টি confirmation এবং Price Action বা Liquidity Sweep trigger প্রয়োজন।")
+    if signal_info.get("reasons"):
+        st.write("Detected: " + ", ".join(signal_info["reasons"]))
+    if final_signal == "WAIT":
+        st.warning("এখনো নির্ধারিত score ও trigger একসাথে মেলেনি। শুধু signal বাড়ানোর জন্য জোর করে BUY/SELL দেখানো হচ্ছে না।")
+
 st.info("Live candle signal provisional. Candle close হওয়ার আগে BUY/SELL/WAIT বদলাতে পারে। Stable signal চাইলে sidebar থেকে Closed candle mode নাও।")
 
 # -----------------------------
