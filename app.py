@@ -937,6 +937,7 @@ def backtest(df, min_score=6, rr=2.0, cost_r=0.05, interval=None, start_index=No
                 "SL": sl, "TP": tp, "result": "OPEN", "gross_R": np.nan,
                 "cost_R": float(cost_r), "R": np.nan, "exit_time": None,
                 "score": result["score"], "regime": result["regime"],
+                "factors": list(result.get("reasons", [])),
             })
             break
 
@@ -950,6 +951,7 @@ def backtest(df, min_score=6, rr=2.0, cost_r=0.05, interval=None, start_index=No
             "SL": sl, "TP": tp, "result": outcome, "gross_R": gross_r,
             "cost_R": float(cost_r), "R": net_r,
             "exit_time": exit_time, "score": result["score"], "regime": result["regime"],
+            "factors": list(result.get("reasons", [])),
         })
         i = max(exit_i + 1, i + 1)
 
@@ -1488,6 +1490,42 @@ with right:
     if not bt_trades.empty:
         stats_df = direction_stats(bt_trades)
         st.dataframe(stats_df, use_container_width=True, hide_index=True)
+
+        # Factor attribution: outcomes for trades whose selected signal carried
+        # each factor. This is co-occurrence analysis, not proof of causation.
+        st.markdown("**🔬 Price Action Factor Win/Loss Analysis**")
+        st.caption("একটি ট্রেডে একাধিক ফ্যাক্টর থাকতে পারে। তাই একই ট্রেড একাধিক সারিতে গণনা হতে পারে। এই রিপোর্ট সম্পর্ক দেখায়, কোনো ফ্যাক্টর একা লাভের কারণ প্রমাণ করে না।")
+        _closed_factor_trades = bt_trades[bt_trades["result"].isin(["WIN", "LOSS"])].copy()
+        _factor_defs = [
+            ("Price Action", "Price action (rejection / breakout / retest)"),
+            ("Liquidity Sweep", "Liquidity sweep"),
+            ("Market Structure", "Market structure"),
+            ("Demand / Supply Zone", "zone reaction"),
+            ("Volume Confirmation", "Volume spike +"),
+        ]
+        _factor_rows = []
+        for _factor_label, _match in _factor_defs:
+            _mask = _closed_factor_trades["factors"].apply(
+                lambda _items: any(_match.lower() in str(_item).lower() for _item in (_items if isinstance(_items, list) else []))
+            ) if "factors" in _closed_factor_trades.columns else pd.Series(False, index=_closed_factor_trades.index)
+            _part = _closed_factor_trades[_mask]
+            _n = len(_part)
+            _w = int((_part["result"] == "WIN").sum())
+            _l = int((_part["result"] == "LOSS").sum())
+            _gross_win = float(_part.loc[_part["gross_R"] > 0, "gross_R"].sum()) if _n else 0.0
+            _gross_loss = abs(float(_part.loc[_part["gross_R"] < 0, "gross_R"].sum())) if _n else 0.0
+            _pf = _gross_win / _gross_loss if _gross_loss > 0 else (np.inf if _gross_win > 0 else 0.0)
+            _factor_rows.append({
+                "Factor": _factor_label,
+                "Trades": _n,
+                "Wins": _w,
+                "Losses": _l,
+                "Win Rate %": round(_w / _n * 100, 1) if _n else 0.0,
+                "Net R": round(float(_part["R"].sum()), 2) if _n else 0.0,
+                "Profit Factor": "∞" if np.isinf(_pf) else round(_pf, 2),
+            })
+        st.dataframe(pd.DataFrame(_factor_rows), use_container_width=True, hide_index=True)
+        st.caption("Only closed trades are counted. A factor is credited when it appeared in the selected signal's reason list; factors are correlated and overlapping.")
 
         # Score-wise report: closed outcomes only; OPEN trades are counted separately.
         st.markdown("**📊 Score-wise Backtest Report**")
