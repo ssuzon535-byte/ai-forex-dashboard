@@ -728,6 +728,22 @@ def get_signal(row, df, min_score=3, experiment=None):
             selected = buy_checks if buy_score >= sell_score else sell_checks
 
         reasons = [name for name, passed in selected.items() if passed]
+        # Record the exact price-action subtype for later win/loss attribution.
+        # Use only the chosen direction so opposite-side patterns are not credited.
+        if signal.endswith("BUY"):
+            if bullish_rejection:
+                reasons.append("Price Action: Rejection (BUY)")
+            if buy_breakout:
+                reasons.append("Price Action: Breakout (BUY)")
+            if buy_retest:
+                reasons.append("Price Action: Retest (BUY)")
+        elif signal.endswith("SELL"):
+            if bearish_rejection:
+                reasons.append("Price Action: Rejection (SELL)")
+            if sell_breakout:
+                reasons.append("Price Action: Breakout (SELL)")
+            if sell_retest:
+                reasons.append("Price Action: Retest (SELL)")
         if not volume_available:
             reasons.append("Volume unavailable from data provider; volume factor omitted")
         if buy_breakout or sell_breakout:
@@ -1497,17 +1513,22 @@ with right:
         st.caption("একটি ট্রেডে একাধিক ফ্যাক্টর থাকতে পারে। তাই একই ট্রেড একাধিক সারিতে গণনা হতে পারে। এই রিপোর্ট সম্পর্ক দেখায়, কোনো ফ্যাক্টর একা লাভের কারণ প্রমাণ করে না।")
         _closed_factor_trades = bt_trades[bt_trades["result"].isin(["WIN", "LOSS"])].copy()
         _factor_defs = [
-            ("Price Action", "Price action (rejection / breakout / retest)"),
-            ("Liquidity Sweep", "Liquidity sweep"),
-            ("Market Structure", "Market structure"),
-            ("Demand / Supply Zone", "zone reaction"),
-            ("Volume Confirmation", "Volume spike +"),
+            ("Price Action (overall)", "Price action (rejection / breakout / retest)", None),
+            ("Rejection", "Price Action: Rejection", None),
+            ("Breakout", "Price Action: Breakout", None),
+            ("Retest", "Price Action: Retest", None),
+            ("Liquidity Sweep", "Liquidity sweep", None),
+            ("Market Structure", "Market structure", None),
+            ("Demand / Supply Zone", "zone reaction", None),
+            ("Volume Confirmation", "Volume spike +", None),
         ]
         _factor_rows = []
-        for _factor_label, _match in _factor_defs:
+        for _factor_label, _match, _direction_filter in _factor_defs:
             _mask = _closed_factor_trades["factors"].apply(
                 lambda _items: any(_match.lower() in str(_item).lower() for _item in (_items if isinstance(_items, list) else []))
             ) if "factors" in _closed_factor_trades.columns else pd.Series(False, index=_closed_factor_trades.index)
+            if _direction_filter:
+                _mask &= _closed_factor_trades["direction"] == _direction_filter
             _part = _closed_factor_trades[_mask]
             _n = len(_part)
             _w = int((_part["result"] == "WIN").sum())
@@ -1524,6 +1545,28 @@ with right:
                 "Net R": round(float(_part["R"].sum()), 2) if _n else 0.0,
                 "Profit Factor": "∞" if np.isinf(_pf) else round(_pf, 2),
             })
+        # Direction-specific price-action subtype performance.
+        for _subtype in ("Rejection", "Breakout", "Retest"):
+            for _direction in ("BUY", "SELL"):
+                _tag = f"Price Action: {_subtype} ({_direction})"
+                _part = _closed_factor_trades[
+                    _closed_factor_trades["factors"].apply(
+                        lambda _items: _tag in (_items if isinstance(_items, list) else [])
+                    )
+                ] if "factors" in _closed_factor_trades.columns else _closed_factor_trades.iloc[0:0]
+                _n = len(_part)
+                _w = int((_part["result"] == "WIN").sum())
+                _l = int((_part["result"] == "LOSS").sum())
+                _gross_win = float(_part.loc[_part["gross_R"] > 0, "gross_R"].sum()) if _n else 0.0
+                _gross_loss = abs(float(_part.loc[_part["gross_R"] < 0, "gross_R"].sum())) if _n else 0.0
+                _pf = _gross_win / _gross_loss if _gross_loss > 0 else (np.inf if _gross_win > 0 else 0.0)
+                _factor_rows.append({
+                    "Factor": f"{_subtype} ({_direction})",
+                    "Trades": _n, "Wins": _w, "Losses": _l,
+                    "Win Rate %": round(_w / _n * 100, 1) if _n else 0.0,
+                    "Net R": round(float(_part["R"].sum()), 2) if _n else 0.0,
+                    "Profit Factor": "∞" if np.isinf(_pf) else round(_pf, 2),
+                })
         st.dataframe(pd.DataFrame(_factor_rows), use_container_width=True, hide_index=True)
         st.caption("Only closed trades are counted. A factor is credited when it appeared in the selected signal's reason list; factors are correlated and overlapping.")
 
