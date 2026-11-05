@@ -155,7 +155,7 @@ with st.sidebar:
         min_value=3,
         max_value=5,
         value=3,
-        help="Default restored to 6 so the dashboard can compare BUY and SELL samples without prematurely filtering signals. Compare direction, score and multiple periods; this does not guarantee accuracy.",
+        help="Minimum confluence required out of the available factors. Volume is omitted when the data provider does not supply it.",
     )
 
     if st.button("🔄 Refresh market data", use_container_width=True):
@@ -567,18 +567,26 @@ def candle_confirmation(row, previous_row=None):
 # Market regime
 # -----------------------------
 def market_regime(row, df):
-    """Describe structure using only candles available at this point."""
+    """Classify recent 5M structure without using future candles."""
     try:
         pos = df.index.get_loc(row.name)
-        history = df.iloc[max(0, pos - 19):pos]
-        if len(history) < 8: return "BUILDING STRUCTURE"
-        prior_high, prior_low = float(history["high"].max()), float(history["low"].min())
-        close, atr = float(row["close"]), float(row.get("ATR", 0) or 0)
-        if atr <= 0: return "RANGE"
-        if close > prior_high: return "BULLISH BOS"
-        if close < prior_low: return "BEARISH BOS"
-        if prior_high - prior_low <= atr * 3: return "RANGE / CONSOLIDATION"
-        return "STRUCTURE FORMING"
+        history = df.iloc[:pos]
+        if len(history) < 10:
+            return "BUILDING STRUCTURE"
+        recent = history.tail(5)
+        previous = history.iloc[-10:-5]
+        rh, rl = float(recent["high"].max()), float(recent["low"].min())
+        ph, pl = float(previous["high"].max()), float(previous["low"].min())
+        close = float(row["close"])
+        if close > ph:
+            return "BULLISH BOS"
+        if close < pl:
+            return "BEARISH BOS"
+        if rh > ph and rl > pl:
+            return "BULLISH HH / HL"
+        if rh < ph and rl < pl:
+            return "BEARISH LH / LL"
+        return "RANGE / STRUCTURE FORMING"
     except Exception:
         return "STRUCTURE UNKNOWN"
 
@@ -587,72 +595,148 @@ def market_regime(row, df):
 # Signal engine
 # -----------------------------
 def get_signal(row, df, min_score=3, experiment=None):
-    """Five-factor XAUUSD 5M engine: price action, liquidity, structure, zones, volume."""
-    empty = {"signal":"WAIT","score":0,"max_score":5,"technical_score_pct":0,
-             "buy_score":0,"sell_score":0,"reasons":[],"regime":"STRUCTURE UNKNOWN",
-             "candle":"Unknown","quality_failures":[]}
+    """Five-factor XAUUSD 5M engine using confirmed candles and past-only levels."""
+    empty = {"signal":"WAIT","score":0,"max_score":4,"technical_score_pct":0,
+             "buy_score":0,"sell_score":0,"reasons":[],
+             "regime":"STRUCTURE UNKNOWN","candle":"Unknown","quality_failures":[]}
     try:
-        if any(k not in row.index or pd.isna(row[k]) for k in ["open","high","low","close","ATR"]):
+        required = ["open", "high", "low", "close", "ATR"]
+        if any(k not in row.index or pd.isna(row[k]) for k in required):
             return empty
         pos = df.index.get_loc(row.name)
-        if not isinstance(pos, (int, np.integer)) or pos < 20: return empty
+        if not isinstance(pos, (int, np.integer)) or pos < 20:
+            return empty
+
         history = df.iloc[:pos]
-        recent10, recent20 = history.tail(10), history.tail(20)
-        o,h,l,c = [float(row[k]) for k in ("open","high","low","close")]
+        recent5 = history.tail(5)
+        prior5 = history.iloc[-10:-5]
+        recent10 = history.tail(10)
+        recent20 = history.tail(20)
+        o, h, l, c = [float(row[k]) for k in ("open", "high", "low", "close")]
         atr = float(row["ATR"])
-        if not np.isfinite(atr) or atr <= 0: return empty
-        prev_high, prev_low = float(recent10["high"].max()), float(recent10["low"].min())
-        swing_high, swing_low = float(recent20["high"].max()), float(recent20["low"].min())
-        rng=max(h-l,1e-12); body=abs(c-o)
-        upper=h-max(o,c); lower=min(o,c)-l
-        bull_rejection = c>o and (lower>=body*0.8 or body/rng>=0.55)
-        bear_rejection = c<o and (upper>=body*0.8 or body/rng>=0.55)
-        buy_sweep = l<prev_low and c>prev_low
-        sell_sweep = h>prev_high and c<prev_high
-        buy_bos, sell_bos = c>swing_high, c<swing_low
-        regime=market_regime(row,df)
-        demand=recent20.loc[recent20["low"].idxmin()]
-        supply=recent20.loc[recent20["high"].idxmax()]
-        demand_low=float(demand["low"]); demand_high=max(float(demand["open"]),float(demand["close"]))
-        supply_low=min(float(supply["open"]),float(supply["close"])); supply_high=float(supply["high"])
-        buy_zone=l<=demand_high+0.25*atr and c>=demand_low
-        sell_zone=h>=supply_low-0.25*atr and c<=supply_high
-        volume_available=("volume" in df.columns and history["volume"].notna().sum()>=10
-                          and pd.notna(row.get("volume")))
-        volume_spike=False
+        if not np.isfinite(atr) or atr <= 0:
+            return empty
+
+        candle_range = max(h - l, 1e-12)
+        body = abs(c - o)
+        upper_wick = h - max(o, c)
+        lower_wick = min(o, c) - l
+        bullish_rejection = c > o and lower_wick >= max(body * 0.8, candle_range * 0.20)
+        bearish_rejection = c < o and upper_wick >= max(body * 0.8, candle_range * 0.20)
+
+        # Levels are calculated only from candles before the signal candle.
+        resistance10 = float(recent10["high"].max())
+        support10 = float(recent10["low"].min())
+        resistance20 = float(recent20["high"].max())
+        support20 = float(recent20["low"].min())
+        previous_close = float(history.iloc[-1]["close"])
+
+        buy_sweep = l < support10 and c > support10
+        sell_sweep = h > resistance10 and c < resistance10
+        buy_breakout = c > resistance20 and previous_close <= resistance20
+        sell_breakout = c < support20 and previous_close >= support20
+        buy_retest = previous_close > resistance20 and l <= resistance20 + 0.25 * atr and c > resistance20
+        sell_retest = previous_close < support20 and h >= support20 - 0.25 * atr and c < support20
+
+        # Short-term HH/HL and LH/LL structure, plus breakout/CHOCH confirmation.
+        recent_high, recent_low = float(recent5["high"].max()), float(recent5["low"].min())
+        prior_high, prior_low = float(prior5["high"].max()), float(prior5["low"].min())
+        bullish_structure = recent_high > prior_high and recent_low > prior_low
+        bearish_structure = recent_high < prior_high and recent_low < prior_low
+        buy_structure = bullish_structure or buy_breakout or (buy_sweep and c > previous_close)
+        sell_structure = bearish_structure or sell_breakout or (sell_sweep and c < previous_close)
+
+        # Approximate demand/supply from recent swing extremes, with a proximity filter.
+        demand_candle = recent20.loc[recent20["low"].idxmin()]
+        supply_candle = recent20.loc[recent20["high"].idxmax()]
+        demand_low = float(demand_candle["low"])
+        demand_high = max(float(demand_candle["open"]), float(demand_candle["close"]))
+        supply_low = min(float(supply_candle["open"]), float(supply_candle["close"]))
+        supply_high = float(supply_candle["high"])
+        buy_zone = l <= demand_high + 0.50 * atr and c >= demand_low and (c - demand_low) <= 1.25 * atr
+        sell_zone = h >= supply_low - 0.50 * atr and c <= supply_high and (supply_high - c) <= 1.25 * atr
+
+        # Tick volume is optional. If provider volume is absent, score out of four.
+        volume_available = (
+            "volume" in df.columns
+            and history["volume"].notna().sum() >= 10
+            and pd.notna(row.get("volume"))
+        )
+        volume_spike = False
         if volume_available:
-            avg=float(history["volume"].tail(20).mean())
-            volume_spike=avg>0 and float(row["volume"])>=1.5*avg
-        buy_checks={"Price action rejection / breakout":bool(bull_rejection or buy_bos),
-                    "Liquidity sweep":bool(buy_sweep),
-                    "Market structure BOS / CHOCH":bool(buy_bos or (buy_sweep and c>float(history.iloc[-1]["close"]))),
-                    "Demand zone reaction":bool(buy_zone)}
-        sell_checks={"Price action rejection / breakout":bool(bear_rejection or sell_bos),
-                     "Liquidity sweep":bool(sell_sweep),
-                     "Market structure BOS / CHOCH":bool(sell_bos or (sell_sweep and c<float(history.iloc[-1]["close"]))),
-                     "Supply zone reaction":bool(sell_zone)}
+            vol_hist = pd.to_numeric(history["volume"].tail(20), errors="coerce").dropna()
+            avg_volume = float(vol_hist.mean()) if not vol_hist.empty else 0.0
+            current_volume = float(row["volume"])
+            volume_spike = avg_volume > 0 and current_volume >= 1.30 * avg_volume
+
+        buy_price_action = bullish_rejection or buy_breakout or buy_retest
+        sell_price_action = bearish_rejection or sell_breakout or sell_retest
+        buy_checks = {
+            "Price action (rejection / breakout / retest)": bool(buy_price_action),
+            "Liquidity sweep": bool(buy_sweep),
+            "Market structure (HH/HL or BOS/CHOCH)": bool(buy_structure),
+            "Demand zone reaction": bool(buy_zone),
+        }
+        sell_checks = {
+            "Price action (rejection / breakout / retest)": bool(sell_price_action),
+            "Liquidity sweep": bool(sell_sweep),
+            "Market structure (LH/LL or BOS/CHOCH)": bool(sell_structure),
+            "Supply zone reaction": bool(sell_zone),
+        }
         if volume_available:
-            buy_checks["Volume spike confirmation"]=bool(volume_spike and c>o)
-            sell_checks["Volume spike confirmation"]=bool(volume_spike and c<o)
-        buy_score=sum(buy_checks.values()); sell_score=sum(sell_checks.values())
-        max_score=len(buy_checks); threshold=max(3,min(int(min_score),max_score))
-        if buy_score>=threshold and buy_score>sell_score and (buy_sweep or buy_bos) and bull_rejection:
-            signal="STRONG BUY" if buy_score>=max_score-1 else "BUY"
-        elif sell_score>=threshold and sell_score>buy_score and (sell_sweep or sell_bos) and bear_rejection:
-            signal="STRONG SELL" if sell_score>=max_score-1 else "SELL"
-        else: signal="WAIT"
-        preferred_buy=buy_score>=sell_score
-        selected=buy_checks if signal.endswith("BUY") else sell_checks if signal.endswith("SELL") else (buy_checks if preferred_buy else sell_checks)
-        reasons=[name for name,passed in selected.items() if passed]
-        if not volume_available: reasons.append("Volume unavailable; volume factor omitted")
-        candle="Bullish rejection" if bull_rejection else "Bearish rejection" if bear_rejection else "No strong rejection"
-        score=max(buy_score,sell_score)
-        return {"signal":signal,"score":int(score),"max_score":max_score,
-                "technical_score_pct":int(round(score/max_score*100)) if max_score else 0,
-                "buy_score":int(buy_score),"sell_score":int(sell_score),"reasons":reasons,
-                "regime":regime,"candle":candle,
-                "quality_failures":[name for name,passed in selected.items() if not passed]}
-    except (KeyError,TypeError,ValueError,IndexError,ZeroDivisionError):
+            buy_checks["Volume spike + bullish candle"] = bool(volume_spike and c > o)
+            sell_checks["Volume spike + bearish candle"] = bool(volume_spike and c < o)
+
+        buy_score = sum(buy_checks.values())
+        sell_score = sum(sell_checks.values())
+        max_score = len(buy_checks)
+        threshold = max(3, min(int(min_score), max_score))
+
+        # A setup needs confluence plus at least one actual price-action/liquidity trigger.
+        buy_trigger = buy_price_action or buy_sweep
+        sell_trigger = sell_price_action or sell_sweep
+        if buy_score >= threshold and buy_score > sell_score and buy_trigger:
+            signal = "STRONG BUY" if buy_score >= max_score - 1 else "BUY"
+        elif sell_score >= threshold and sell_score > buy_score and sell_trigger:
+            signal = "STRONG SELL" if sell_score >= max_score - 1 else "SELL"
+        else:
+            signal = "WAIT"
+
+        if signal.endswith("BUY"):
+            selected = buy_checks
+        elif signal.endswith("SELL"):
+            selected = sell_checks
+        else:
+            selected = buy_checks if buy_score >= sell_score else sell_checks
+
+        reasons = [name for name, passed in selected.items() if passed]
+        if not volume_available:
+            reasons.append("Volume unavailable from data provider; volume factor omitted")
+        if buy_breakout or sell_breakout:
+            reasons.append("Confirmed close beyond prior 20-candle level")
+        if buy_retest or sell_retest:
+            reasons.append("Breakout retest detected")
+        candle = (
+            "Bullish rejection" if bullish_rejection else
+            "Bearish rejection" if bearish_rejection else
+            "Strong bullish candle" if c > o and body / candle_range >= 0.55 else
+            "Strong bearish candle" if c < o and body / candle_range >= 0.55 else
+            "No clear rejection"
+        )
+        score = max(buy_score, sell_score)
+        return {
+            "signal": signal,
+            "score": int(score),
+            "max_score": int(max_score),
+            "technical_score_pct": int(round(score / max_score * 100)) if max_score else 0,
+            "buy_score": int(buy_score),
+            "sell_score": int(sell_score),
+            "reasons": reasons,
+            "regime": market_regime(row, df),
+            "candle": candle,
+            "quality_failures": [name for name, passed in selected.items() if not passed],
+        }
+    except (KeyError, TypeError, ValueError, IndexError, ZeroDivisionError):
         return empty
 
 
