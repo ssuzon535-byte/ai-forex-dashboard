@@ -1587,30 +1587,6 @@ fig.add_trace(
         name="Price",
     )
 )
-fig.add_trace(
-    go.Scatter(
-        x=chart_df["datetime"],
-        y=chart_df["EMA20"],
-        name="EMA20",
-        line=dict(width=1),
-    )
-)
-fig.add_trace(
-    go.Scatter(
-        x=chart_df["datetime"],
-        y=chart_df["EMA50"],
-        name="EMA50",
-        line=dict(width=1),
-    )
-)
-fig.add_trace(
-    go.Scatter(
-        x=chart_df["datetime"],
-        y=chart_df["EMA200"],
-        name="EMA200",
-        line=dict(width=1),
-    )
-)
 
 if trade:
     fig.add_hline(y=trade["entry"], annotation_text="Entry")
@@ -1656,26 +1632,9 @@ with st.expander("📊 Backtest trade history"):
             hide_index=True,
         )
 
-# -----------------------------
-# Live indicator values
-# -----------------------------
-with st.expander("🔎 Current indicator values"):
-    indicator_cols = [
-        "datetime", "open", "high", "low", "close",
-        "EMA20", "EMA50", "EMA200",
-        "RSI", "ATR", "ADX", "PLUS_DI", "MINUS_DI", "MACD", "MACD_signal",
-        "BB_upper", "BB_mid", "BB_lower"
-    ]
-    indicator_display = df[indicator_cols].tail(10).copy()
-    indicator_display["datetime"] = (
-        indicator_display["datetime"].dt.tz_convert("Asia/Dhaka")
-        .dt.strftime("%Y-%m-%d %H:%M:%S")
-    )
-    st.dataframe(
-        indicator_display,
-        use_container_width=True,
-        hide_index=True,
-    )
+# Legacy EMA / RSI / ADX / MACD / Bollinger values intentionally hidden.
+# The active dashboard strategy is Price Action, Liquidity, Structure,
+# Supply/Demand and Volume confirmation.
 
 # -----------------------------
 # Status
