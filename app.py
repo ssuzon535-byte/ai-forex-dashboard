@@ -1287,31 +1287,67 @@ else:
 left, right = st.columns(2)
 
 with left:
-    st.subheader("🧠 Decision Factors")
-    factors = {
-        "Price / EMA20": "PASS" if (
-            (raw_direction == "BUY" and signal_row["close"] > signal_row["EMA20"])
-            or
-            (raw_direction == "SELL" and signal_row["close"] < signal_row["EMA20"])
-        ) else "NO",
-        "EMA structure": "PASS" if (
-            (raw_direction == "BUY" and signal_row["EMA20"] > signal_row["EMA50"] > signal_row["EMA200"])
-            or
-            (raw_direction == "SELL" and signal_row["EMA20"] < signal_row["EMA50"] < signal_row["EMA200"])
-        ) else "NO",
-        "RSI": f"{signal_row['RSI']:.1f}",
-        "ADX": f"{signal_row['ADX']:.1f}",
-        "MACD": "Bullish" if signal_row["MACD"] > signal_row["MACD_signal"] else "Bearish",
-        "Candle": signal_info["candle"],
-        "Market regime": regime,
-        "MTF": mtf_status,
-    }
-    st.table(pd.DataFrame(list(factors.items()), columns=["Factor", "Status"]))
+    st.subheader("🧠 Price Action Decision Factors")
+
+    # Show the exact factors used by the current price-action signal engine.
+    # The selected side is the generated signal, or the stronger side when WAIT.
+    _signal_name = str(signal_info.get("signal", "WAIT"))
+    _reasons = set(signal_info.get("reasons", []))
+    _failed = set(signal_info.get("quality_failures", []))
+    _selected_direction = (
+        "BUY" if _signal_name.endswith("BUY")
+        else "SELL" if _signal_name.endswith("SELL")
+        else ("BUY" if signal_info.get("buy_score", 0) >= signal_info.get("sell_score", 0) else "SELL")
+    )
+    _factor_names = [
+        "Price action (rejection / breakout / retest)",
+        "Liquidity sweep",
+        "Market structure (HH/HL or BOS/CHOCH)" if _selected_direction == "BUY"
+            else "Market structure (LH/LL or BOS/CHOCH)",
+        "Demand zone reaction" if _selected_direction == "BUY" else "Supply zone reaction",
+    ]
+    _factor_labels = [
+        "Price Action",
+        "Liquidity Sweep",
+        "Market Structure (HH/HL or LH/LL)",
+        "Demand Zone" if _selected_direction == "BUY" else "Supply Zone",
+    ]
+    _factor_rows = []
+    for _label, _name in zip(_factor_labels, _factor_names):
+        if _name in _reasons:
+            _status = "PASS"
+        elif _name in _failed:
+            _status = "NO"
+        else:
+            _status = "N/A"
+        _factor_rows.append({"Factor": _label, "Status": _status})
+
+    _volume_note = any("Volume unavailable" in str(x) for x in _reasons)
+    if _volume_note:
+        _volume_status = "N/A (provider data unavailable)"
+    else:
+        _volume_buy = "Volume spike + bullish candle" in _reasons
+        _volume_sell = "Volume spike + bearish candle" in _reasons
+        _volume_fail_buy = "Volume spike + bullish candle" in _failed
+        _volume_fail_sell = "Volume spike + bearish candle" in _failed
+        _volume_status = (
+            "PASS" if (_volume_buy or _volume_sell)
+            else "NO" if (_volume_fail_buy or _volume_fail_sell)
+            else "N/A"
+        )
+    _factor_rows.append({"Factor": "Volume Confirmation", "Status": _volume_status})
+    _factor_rows.append({"Factor": "Market Regime", "Status": regime})
+    _factor_rows.append({"Factor": "Candle", "Status": signal_info.get("candle", "Unknown")})
+    _factor_rows.append({
+        "Factor": "Selected side",
+        "Status": f"{_selected_direction} · score {signal_info.get('buy_score', 0) if _selected_direction == 'BUY' else signal_info.get('sell_score', 0)}/{signal_info.get('max_score', 0)}",
+    })
+    st.table(pd.DataFrame(_factor_rows))
 
     if signal_info.get("signal") == "WAIT" and signal_info.get("quality_failures"):
         st.warning("WAIT কারণ: " + " · ".join(signal_info["quality_failures"]))
     elif signal_info.get("signal") == "WAIT":
-        st.info("WAIT: Technical score বা BUY/SELL direction-এর শর্ত পূরণ হয়নি.")
+        st.info("WAIT: Price action score বা direction-এর শর্ত পূরণ হয়নি.")
 
 with right:
     st.subheader("📈 Historical Backtest")
