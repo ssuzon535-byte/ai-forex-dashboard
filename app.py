@@ -635,8 +635,26 @@ def get_signal(row, df, min_score=3, experiment=None):
         sell_sweep = h > resistance10 and c < resistance10
         buy_breakout = c > resistance20 and previous_close <= resistance20
         sell_breakout = c < support20 and previous_close >= support20
-        buy_retest = previous_close > resistance20 and l <= resistance20 + 0.25 * atr and c > resistance20
-        sell_retest = previous_close < support20 and h >= support20 - 0.25 * atr and c < support20
+        # Retest must use the breakout level that existed BEFORE the
+        # previous candle. Using resistance20/support20 above would include
+        # the previous candle itself, making a close beyond that level impossible.
+        retest_history = df.iloc[max(0, pos - 21):pos - 1]
+        if len(retest_history) >= 10:
+            retest_resistance = float(retest_history["high"].tail(20).max())
+            retest_support = float(retest_history["low"].tail(20).min())
+            buy_retest = (
+                previous_close > retest_resistance
+                and l <= retest_resistance + 0.25 * atr
+                and c > retest_resistance
+            )
+            sell_retest = (
+                previous_close < retest_support
+                and h >= retest_support - 0.25 * atr
+                and c < retest_support
+            )
+        else:
+            buy_retest = False
+            sell_retest = False
 
         # Short-term HH/HL and LH/LL structure, plus breakout/CHOCH confirmation.
         recent_high, recent_low = float(recent5["high"].max()), float(recent5["low"].min())
@@ -1462,36 +1480,10 @@ with right:
         st.dataframe(pd.DataFrame(_threshold_rows), use_container_width=True, hide_index=True)
         st.caption("This is a threshold sensitivity check, not proof of future performance. Very small trade samples are unreliable.")
 
-    # Decision-factor sensitivity tests on the identical chronological holdout.
-    if len(df) - _holdout_start >= 30:
-        with st.expander("🧪 Decision Factor Experiment (same holdout)", expanded=True):
-            st.caption("One factor changes per row. Compare Net R, Profit Factor, drawdown and trade count, not win rate alone. Diagnostic only; live settings remain unchanged.")
-            _experiment_cases = [
-                ("Baseline", min_score, rr2, {}),
-                ("Minimum score 4", 4, rr2, {}), ("Minimum score 5", 5, rr2, {}),
-                ("RSI 50/50", min_score, rr2, {"rsi_buy":50.0,"rsi_sell":50.0}),
-                ("RSI 55/45", min_score, rr2, {"rsi_buy":55.0,"rsi_sell":45.0}),
-                ("ADX 18", min_score, rr2, {"adx_score":18.0,"adx_gate":18.0}),
-                ("ADX 22", min_score, rr2, {"adx_score":22.0,"adx_gate":22.0}),
-                ("ADX 25", min_score, rr2, {"adx_score":25.0,"adx_gate":25.0}),
-                ("Extension 1.0 ATR", min_score, rr2, {"extension_atr":1.0}),
-                ("Extension 1.5 ATR", min_score, rr2, {"extension_atr":1.5}),
-                ("Extension 2.0 ATR", min_score, rr2, {"extension_atr":2.0}),
-                ("Candle filter OFF", min_score, rr2, {"use_candle":False}),
-                ("DI filter OFF", min_score, rr2, {"use_di":False}),
-                ("EMA slope OFF", min_score, rr2, {"use_slope":False}),
-                ("EMA structure OFF", min_score, rr2, {"use_ema_structure":False}),
-                ("RR 1:1.5", min_score, 1.5, {}), ("RR 1:2.5", min_score, 2.5, {}),
-            ]
-            _exp_rows = []
-            for _label, _score, _rr, _cfg in _experiment_cases:
-                _, _st = backtest(df, min_score=_score, rr=_rr, cost_r=estimated_cost_r,
-                    interval=interval, start_index=_holdout_start, end_index=len(df), experiment=_cfg)
-                _exp_rows.append({"Test":_label,"Trades":_st["trades"],"Win rate %":round(_st["win_rate"],1),
-                    "Net R":round(_st["net_r"],2),"Profit Factor":"∞" if np.isinf(_st["profit_factor"]) else round(_st["profit_factor"],2),
-                    "Max DD R":round(_st["max_drawdown_r"],2)})
-            st.dataframe(pd.DataFrame(_exp_rows), use_container_width=True, hide_index=True)
-            st.caption("This is a one-factor-at-a-time test. Combined interactions are not tested. Small samples are unreliable; validate promising settings on a separate later period.")
+    # Legacy RSI/ADX/EMA experiment rows were removed because the active
+    # price-action engine does not implement those experiment parameters.
+    st.caption("Only the active Price Action rules and score-threshold sensitivity are evaluated here. No inactive EMA/RSI/ADX experiment is presented as a valid test.")
+
 
     if not bt_trades.empty:
         stats_df = direction_stats(bt_trades)
