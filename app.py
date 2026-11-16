@@ -146,16 +146,16 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Analysis timeframe")
-    st.caption("শুধু 5M candle ব্যবহার হবে। 1H/15M বা MTF confirmation নেই।")
+    st.caption("Entry: completed 5M candle | Trend filter: completed 1H candles reconstructed from loaded history.")
     mtf_enabled = False
     strict_mtf = False
 
     min_score = st.slider(
-        "Minimum technical score",
-        min_value=2,
+        "Minimum confirmation score",
+        min_value=3,
         max_value=4,
-        value=2,
-        help="2 = more setups, 3 = balanced, 4 = very selective. A signal still needs a price-action or liquidity trigger.",
+        value=4,
+        help="High-confirmation mode requires at least 4 independent factors, a price-action/liquidity trigger and aligned 1H structure.",
     )
 
     if st.button("🔄 Refresh market data", use_container_width=True):
@@ -592,13 +592,63 @@ def market_regime(row, df):
 
 
 # -----------------------------
+# Higher-timeframe trend filter
+# -----------------------------
+def higher_timeframe_trend(df, signal_time, signal_interval_minutes=5):
+    """Infer 1H structure from completed 5M candles only; never use future bars."""
+    result = {"trend": "UNAVAILABLE", "completed_bars": 0, "reason": "Not enough completed 1H candles"}
+    try:
+        if df is None or df.empty or "datetime" not in df.columns:
+            return result
+        work = df[["datetime", "open", "high", "low", "close"]].copy()
+        work["datetime"] = pd.to_datetime(work["datetime"], utc=True, errors="coerce")
+        for column in ("open", "high", "low", "close"):
+            work[column] = pd.to_numeric(work[column], errors="coerce")
+        work = work.dropna().sort_values("datetime")
+        if len(work) < 72:
+            return result
+        candle_open = pd.to_datetime(signal_time, utc=True, errors="coerce")
+        if pd.isna(candle_open):
+            result["reason"] = "Signal candle timestamp is invalid"
+            return result
+        candle_close = candle_open + pd.Timedelta(minutes=int(signal_interval_minutes))
+        hourly = (
+            work.set_index("datetime")
+            .resample("1h", label="right", closed="left")
+            .agg(open=("open", "first"), high=("high", "max"), low=("low", "min"),
+                 close=("close", "last"), count=("close", "count"))
+            .dropna(subset=["open", "high", "low", "close"])
+        )
+        hourly = hourly[(hourly["count"] >= 10) & (hourly.index <= candle_close)]
+        result["completed_bars"] = int(len(hourly))
+        if len(hourly) < 6:
+            result["reason"] = "Need at least 6 valid completed 1H candles"
+            return result
+        recent, previous = hourly.tail(3), hourly.iloc[-6:-3]
+        rh, rl = float(recent["high"].max()), float(recent["low"].min())
+        ph, pl = float(previous["high"].max()), float(previous["low"].min())
+        last_close, first_recent_close = float(hourly.iloc[-1]["close"]), float(recent["close"].iloc[0])
+        if rh > ph and rl > pl and last_close >= first_recent_close:
+            result.update({"trend":"BULLISH","reason":"Completed 1H structure has higher highs and higher lows"})
+        elif rh < ph and rl < pl and last_close <= first_recent_close:
+            result.update({"trend":"BEARISH","reason":"Completed 1H structure has lower highs and lower lows"})
+        else:
+            result.update({"trend":"RANGE / MIXED","reason":"Completed 1H structure is mixed or ranging"})
+        return result
+    except Exception as exc:
+        result["reason"] = f"1H filter error: {str(exc)[:100]}"
+        return result
+
+
+# -----------------------------
 # Signal engine
 # -----------------------------
 def get_signal(row, df, min_score=3, experiment=None):
     """Five-factor XAUUSD 5M engine using confirmed candles and past-only levels."""
     empty = {"signal":"WAIT","score":0,"max_score":4,"technical_score_pct":0,
              "buy_score":0,"sell_score":0,"reasons":[],
-             "regime":"STRUCTURE UNKNOWN","candle":"Unknown","quality_failures":[]}
+             "regime":"STRUCTURE UNKNOWN","candle":"Unknown","quality_failures":[],
+             "htf_trend":"UNAVAILABLE","htf_reason":"Not calculated","htf_bars":0}
     try:
         required = ["open", "high", "low", "close", "ATR"]
         if any(k not in row.index or pd.isna(row[k]) for k in required):
@@ -720,6 +770,16 @@ def get_signal(row, df, min_score=3, experiment=None):
         else:
             signal = "WAIT"
 
+        candidate_signal = signal
+        htf = higher_timeframe_trend(df, row.get("datetime"), signal_interval_minutes=5)
+        htf_trend, htf_reason = htf["trend"], htf["reason"]
+        htf_aligned = ((candidate_signal.endswith("BUY") and htf_trend == "BULLISH")
+                       or (candidate_signal.endswith("SELL") and htf_trend == "BEARISH"))
+        if candidate_signal.endswith("BUY") and htf_trend != "BULLISH":
+            signal = "WAIT"
+        elif candidate_signal.endswith("SELL") and htf_trend != "BEARISH":
+            signal = "WAIT"
+
         if signal.endswith("BUY"):
             selected = buy_checks
         elif signal.endswith("SELL"):
@@ -728,6 +788,7 @@ def get_signal(row, df, min_score=3, experiment=None):
             selected = buy_checks if buy_score >= sell_score else sell_checks
 
         reasons = [name for name, passed in selected.items() if passed]
+        reasons.append(f"1H trend: {htf_trend} ({htf_reason})")
         # Record the exact price-action subtype for later win/loss attribution.
         # Use only the chosen direction so opposite-side patterns are not credited.
         if signal.endswith("BUY"):
@@ -768,7 +829,13 @@ def get_signal(row, df, min_score=3, experiment=None):
             "reasons": reasons,
             "regime": market_regime(row, df),
             "candle": candle,
-            "quality_failures": [name for name, passed in selected.items() if not passed],
+            "quality_failures": (
+                [name for name, passed in selected.items() if not passed]
+                + (["1H trend not aligned or unavailable"] if candidate_signal != "WAIT" and not htf_aligned else [])
+            ),
+            "htf_trend": htf_trend,
+            "htf_reason": htf_reason,
+            "htf_bars": htf["completed_bars"],
         }
     except (KeyError, TypeError, ValueError, IndexError, ZeroDivisionError):
         return empty
@@ -1248,9 +1315,13 @@ with st.expander("🔎 কেন BUY/SELL আসছে না? (Signal diagnosti
     _d1.metric("BUY score", f"{signal_info.get('buy_score', 0)}/{signal_info.get('max_score', 0)}")
     _d2.metric("SELL score", f"{signal_info.get('sell_score', 0)}/{signal_info.get('max_score', 0)}")
     _d3.metric("Required score", str(min_score))
-    st.write("BUY/SELL পেতে অন্তত ২টি confirmation এবং Price Action বা Liquidity Sweep trigger প্রয়োজন।")
+    st.write("BUY/SELL পেতে কমপক্ষে ৪টি confirmation, Price Action/Liquidity trigger এবং completed 1H trend alignment প্রয়োজন।")
+    st.metric("Completed 1H Trend", signal_info.get("htf_trend", "UNAVAILABLE"))
+    st.caption(f"Valid completed 1H candles: {signal_info.get('htf_bars', 0)}")
     if signal_info.get("reasons"):
         st.write("Detected: " + ", ".join(signal_info["reasons"]))
+    if signal_info.get("quality_failures"):
+        st.write("Missing / failed: " + ", ".join(signal_info["quality_failures"]))
     if final_signal == "WAIT":
         st.warning("এখনো নির্ধারিত score ও trigger একসাথে মেলেনি। শুধু signal বাড়ানোর জন্য জোর করে BUY/SELL দেখানো হচ্ছে না।")
 
@@ -1492,7 +1563,7 @@ with right:
     # Diagnostic only; it does not automatically change live signals.
     if len(df) - _holdout_start >= 30:
         st.markdown("**Signal Threshold Comparison (same holdout period)**")
-        st.caption("Compares minimum scores 6, 7 and 8 on the same final 30% period. Evaluate Net R, Profit Factor, drawdown and trade count together, not win rate alone.")
+        st.caption("Compares minimum scores 3, 4 and 5 on the same final 30% period. Evaluate Net R, Profit Factor, drawdown and trade count together, not win rate alone.")
         _threshold_rows = []
         for _threshold in (3, 4, 5):
             _threshold_trades, _threshold_stats = backtest(
