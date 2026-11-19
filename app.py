@@ -25,6 +25,36 @@ def safe_accuracy_pct(wins, total):
     except (TypeError, ValueError, OverflowError):
         return 0.0
 
+
+def assess_live_data_freshness(df, interval="5min", max_age_minutes=20):
+    """Fail closed when the candle used for analysis is too old or has an invalid timestamp."""
+    result = {"ok": False, "status": "UNAVAILABLE", "age_minutes": None, "message": "No usable candle timestamp"}
+    try:
+        if df is None or len(df) < 2 or "datetime" not in df.columns:
+            return result
+        latest = pd.to_datetime(df.iloc[-2]["datetime"], utc=True, errors="coerce")
+        if pd.isna(latest):
+            result["message"] = "Latest completed candle timestamp is invalid"
+            return result
+        minutes = {"5min": 5, "15min": 15, "1h": 60}.get(interval)
+        if not minutes:
+            result["message"] = "Unsupported timeframe for freshness check"
+            return result
+        completed_at = latest + pd.Timedelta(minutes=minutes)
+        age = (pd.Timestamp.now(tz="UTC") - completed_at).total_seconds() / 60.0
+        result["age_minutes"] = round(age, 1)
+        if age < -2:
+            result.update({"status": "FUTURE DATA", "message": "Latest completed candle appears to be in the future"})
+        elif age > float(max_age_minutes):
+            result.update({"status": "STALE", "message": f"Latest completed candle is {age:.1f} minutes old"})
+        else:
+            result.update({"ok": True, "status": "FRESH", "message": f"Latest completed candle is {max(0.0, age):.1f} minutes old"})
+        return result
+    except Exception as exc:
+        result["message"] = f"Freshness check failed: {str(exc)[:100]}"
+        return result
+
+
 def trade_result_from_path(entry, sl, tp, highs, lows, direction):
     """Determine which target/stop was hit first from OHLC paths."""
     direction = str(direction).upper()
@@ -425,34 +455,6 @@ def validate_market_data(df, interval):
             problems.append(f"Latest candle is stale ({age_hours:.1f} hours old).")
     return problems
 
-
-def assess_live_data_freshness(df, interval="5min", max_age_minutes=20):
-    """Fail closed when the candle used for analysis is too old or has an invalid timestamp."""
-    result = {"ok": False, "status": "UNAVAILABLE", "age_minutes": None, "message": "No usable candle timestamp"}
-    try:
-        if df is None or len(df) < 2 or "datetime" not in df.columns:
-            return result
-        latest = pd.to_datetime(df.iloc[-2]["datetime"], utc=True, errors="coerce")
-        if pd.isna(latest):
-            result["message"] = "Latest completed candle timestamp is invalid"
-            return result
-        minutes = {"5min": 5, "15min": 15, "1h": 60}.get(interval)
-        if not minutes:
-            result["message"] = "Unsupported timeframe for freshness check"
-            return result
-        completed_at = latest + pd.Timedelta(minutes=minutes)
-        age = (pd.Timestamp.now(tz="UTC") - completed_at).total_seconds() / 60.0
-        result["age_minutes"] = round(age, 1)
-        if age < -2:
-            result.update({"status": "FUTURE DATA", "message": "Latest completed candle appears to be in the future"})
-        elif age > float(max_age_minutes):
-            result.update({"status": "STALE", "message": f"Latest completed candle is {age:.1f} minutes old"})
-        else:
-            result.update({"ok": True, "status": "FRESH", "message": f"Latest completed candle is {max(0.0, age):.1f} minutes old"})
-        return result
-    except Exception as exc:
-        result["message"] = f"Freshness check failed: {str(exc)[:100]}"
-        return result
 
 
 # -----------------------------
