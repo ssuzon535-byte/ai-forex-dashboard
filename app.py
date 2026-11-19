@@ -232,6 +232,12 @@ with st.sidebar:
             test_results.append(("SELL gap-through TP fill", resolve_bar_exit("SELL", 105, 90, 89, 91, 87) == ("WIN", 89.0)))
             test_results.append(("Same-candle SL-first rule", resolve_bar_exit("BUY", 95, 110, 100, 111, 94) == ("LOSS", 95.0)))
             test_results.append(("5M-only timeframe", INTERVALS == {"5M": "5min"}))
+            _fresh_test_df = pd.DataFrame({"datetime": [pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=10), pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=5)]})
+            _fresh_result = assess_live_data_freshness(_fresh_test_df, "5min", 20)
+            test_results.append(("Fresh 5M data accepted", _fresh_result["ok"]))
+            _stale_test_df = pd.DataFrame({"datetime": [pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=2), pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=90)]})
+            _stale_result = assess_live_data_freshness(_stale_test_df, "5min", 20)
+            test_results.append(("Stale 5M data blocked", not _stale_result["ok"] and _stale_result["status"] == "STALE"))
             for test_name, passed in test_results:
                 if passed:
                     st.success(f"PASS: {test_name}")
@@ -418,6 +424,35 @@ def validate_market_data(df, interval):
         elif age_hours > 72:
             problems.append(f"Latest candle is stale ({age_hours:.1f} hours old).")
     return problems
+
+
+def assess_live_data_freshness(df, interval="5min", max_age_minutes=20):
+    """Fail closed when the candle used for analysis is too old or has an invalid timestamp."""
+    result = {"ok": False, "status": "UNAVAILABLE", "age_minutes": None, "message": "No usable candle timestamp"}
+    try:
+        if df is None or len(df) < 2 or "datetime" not in df.columns:
+            return result
+        latest = pd.to_datetime(df.iloc[-2]["datetime"], utc=True, errors="coerce")
+        if pd.isna(latest):
+            result["message"] = "Latest completed candle timestamp is invalid"
+            return result
+        minutes = {"5min": 5, "15min": 15, "1h": 60}.get(interval)
+        if not minutes:
+            result["message"] = "Unsupported timeframe for freshness check"
+            return result
+        completed_at = latest + pd.Timedelta(minutes=minutes)
+        age = (pd.Timestamp.now(tz="UTC") - completed_at).total_seconds() / 60.0
+        result["age_minutes"] = round(age, 1)
+        if age < -2:
+            result.update({"status": "FUTURE DATA", "message": "Latest completed candle appears to be in the future"})
+        elif age > float(max_age_minutes):
+            result.update({"status": "STALE", "message": f"Latest completed candle is {age:.1f} minutes old"})
+        else:
+            result.update({"ok": True, "status": "FRESH", "message": f"Latest completed candle is {max(0.0, age):.1f} minutes old"})
+        return result
+    except Exception as exc:
+        result["message"] = f"Freshness check failed: {str(exc)[:100]}"
+        return result
 
 
 # -----------------------------
@@ -1209,6 +1244,13 @@ signal_info = get_signal(
     min_score=min_score,
 )
 
+# Live safety gate: stale/future candle data must never produce an actionable signal.
+live_data_status = assess_live_data_freshness(df, interval=interval, max_age_minutes=20)
+if not live_data_status["ok"]:
+    signal_info["signal"] = "WAIT"
+    signal_info["quality_failures"] = list(signal_info.get("quality_failures", []))
+    signal_info["quality_failures"].append("Live data freshness check failed: " + live_data_status["message"])
+
 trade = build_trade(
     signal_row,
     signal_info["signal"],
@@ -1303,6 +1345,11 @@ col2.metric("Final Signal", final_signal)
 col3.metric("Technical Score", f"{signal_info['score']}/{signal_info['max_score']}")
 col4.metric("Confluence (not win probability)", f"{signal_info['technical_score_pct']}%")
 col5.metric("Regime", regime)
+
+if live_data_status["ok"]:
+    st.success("Live data check: FRESH | " + live_data_status["message"])
+else:
+    st.warning("Live data check: " + live_data_status["status"] + " | " + live_data_status["message"] + ". New BUY/SELL signals are blocked until fresh data arrives.")
 
 st.caption(
     f"Current 5M candle: {candle_open_time.strftime('%Y-%m-%d %H:%M:%S')} BD time | "
