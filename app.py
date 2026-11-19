@@ -1009,6 +1009,81 @@ def add_trade_levels(df):
     return d
 
 
+def detect_fair_value_gaps(data):
+    """Detect simple 3-candle FVGs from completed candles only."""
+    if data is None or len(data) < 3:
+        return []
+    found = []
+    for i in range(2, len(data)):
+        first = data.iloc[i - 2]
+        third = data.iloc[i]
+        if float(third["low"]) > float(first["high"]):
+            found.append({"type": "BULLISH FVG", "low": float(first["high"]),
+                          "high": float(third["low"]), "time": third["datetime"]})
+        elif float(third["high"]) < float(first["low"]):
+            found.append({"type": "BEARISH FVG", "low": float(third["high"]),
+                          "high": float(first["low"]), "time": third["datetime"]})
+    return found
+
+
+def update_live_signal_history(signal, trade_setup, signal_time, market_df):
+    """Keep unique live signals for one rolling hour and resolve at 1:1 TP/SL."""
+    now = pd.Timestamp.now(tz="UTC")
+    history = st.session_state.setdefault("live_signal_history", [])
+    cutoff = now - pd.Timedelta(hours=1)
+    history = [
+        item for item in history
+        if pd.to_datetime(item["created_at"], utc=True) >= cutoff
+    ]
+
+    if signal in ("BUY", "STRONG BUY", "SELL", "STRONG SELL") and trade_setup:
+        key = pd.to_datetime(signal_time, utc=True).isoformat()
+        if not any(item["key"] == key for item in history):
+            history.append({
+                "key": key,
+                "created_at": now.isoformat(),
+                "signal_time": key,
+                "direction": trade_setup["direction"],
+                "entry": float(trade_setup["entry"]),
+                "sl": float(trade_setup["sl"]),
+                "tp": float(trade_setup["tp1"]),
+                "status": "OPEN",
+            })
+
+    if market_df is not None and not market_df.empty:
+        bar = market_df.iloc[-1]
+        bar_time = pd.to_datetime(bar["datetime"], utc=True, errors="coerce")
+        if pd.notna(bar_time):
+            for item in history:
+                if item["status"] != "OPEN":
+                    continue
+                created = pd.to_datetime(item["created_at"], utc=True)
+                if bar_time < created:
+                    continue
+                high, low = float(bar["high"]), float(bar["low"])
+                if item["direction"] == "BUY":
+                    hit_sl, hit_tp = low <= item["sl"], high >= item["tp"]
+                else:
+                    hit_sl, hit_tp = high >= item["sl"], low <= item["tp"]
+                # If both levels are touched in one 5M candle, assume SL first.
+                if hit_sl:
+                    item["status"] = "LOSS"
+                    item["closed_at"] = now.isoformat()
+                elif hit_tp:
+                    item["status"] = "WIN"
+                    item["closed_at"] = now.isoformat()
+
+    for item in history:
+        if item["status"] == "OPEN":
+            created = pd.to_datetime(item["created_at"], utc=True)
+            if now - created >= pd.Timedelta(hours=1):
+                item["status"] = "EXPIRED"
+                item["closed_at"] = now.isoformat()
+
+    st.session_state["live_signal_history"] = history
+    return history
+
+
 # -----------------------------
 # Backtest
 # -----------------------------
@@ -1407,6 +1482,32 @@ st.caption(
     f"Next candle in: {countdown_text} | Auto-refresh: 60 sec | "
     f"Last analysis candle: {price_time_display} | Mode: {signal_mode}"
 )
+
+
+# Rolling one-hour live signal journal. Only unique 5M signal candles are stored.
+_live_history = update_live_signal_history(
+    final_signal, trade, signal_row["datetime"], df
+)
+_live_wins = sum(x["status"] == "WIN" for x in _live_history)
+_live_losses = sum(x["status"] == "LOSS" for x in _live_history)
+_live_open = sum(x["status"] == "OPEN" for x in _live_history)
+_live_expired = sum(x["status"] == "EXPIRED" for x in _live_history)
+st.subheader("⏱️ Last 1 Hour Live Signal Story")
+_h1, _h2, _h3, _h4 = st.columns(4)
+_h1.metric("WIN", _live_wins)
+_h2.metric("LOSS", _live_losses)
+_h3.metric("OPEN", _live_open)
+_h4.metric("EXPIRED", _live_expired)
+if _live_history:
+    _journal = pd.DataFrame(_live_history)
+    _journal["Signal time (BD)"] = pd.to_datetime(_journal["signal_time"], utc=True).dt.tz_convert("Asia/Dhaka").dt.strftime("%H:%M:%S")
+    _journal["Entry"] = _journal["entry"].map(lambda x: f"{x:.2f}")
+    _journal["SL"] = _journal["sl"].map(lambda x: f"{x:.2f}")
+    _journal["TP (1:1)"] = _journal["tp"].map(lambda x: f"{x:.2f}")
+    st.dataframe(_journal[["Signal time (BD)", "direction", "Entry", "SL", "TP (1:1)", "status"]], use_container_width=True, hide_index=True)
+else:
+    st.info("শেষ ১ ঘণ্টায় এখনো কোনো নতুন BUY/SELL signal তৈরি হয়নি।")
+st.caption("প্রতিটি signal একবারই গণনা হয়। TP বা SL না লাগলে OPEN থাকবে; ১ ঘণ্টা পর EXPIRED হবে এবং এক ঘণ্টার window থেকে বাদ যাবে।")
 
 with st.expander("🔎 কেন BUY/SELL আসছে না? (Signal diagnostics)", expanded=(final_signal == "WAIT")):
     _d1, _d2, _d3 = st.columns(3)
@@ -1819,6 +1920,9 @@ with right:
 st.subheader("📉 Live XAUUSD 5M Candlestick Chart")
 
 chart_df = df.tail(min(180, len(df))).copy()
+# Use completed candles for structure overlays and FVG detection.
+_overlay_df = df.iloc[:-1].tail(180).copy() if len(df) > 1 else df.copy()
+_overlay_fvgs = detect_fair_value_gaps(_overlay_df)
 # Normalize chart inputs explicitly and discard rows Plotly cannot render.
 chart_df["datetime"] = pd.to_datetime(
     chart_df["datetime"], utc=True, errors="coerce"
@@ -1841,6 +1945,28 @@ fig.add_trace(
         name="Price",
     )
 )
+
+# Recent support/resistance from completed candles (not future-looking).
+if len(_overlay_df) >= 20:
+    _support_level = float(_overlay_df["low"].tail(20).min())
+    _resistance_level = float(_overlay_df["high"].tail(20).max())
+    fig.add_hline(y=_support_level, line_dash="dash", line_color="green",
+                  annotation_text="Support", annotation_position="bottom left")
+    fig.add_hline(y=_resistance_level, line_dash="dash", line_color="red",
+                  annotation_text="Resistance", annotation_position="top left")
+
+# Draw the latest bullish/bearish fair value gaps as shaded price zones.
+for _fvg in _overlay_fvgs[-4:]:
+    _fvg_time = pd.to_datetime(_fvg["time"], utc=True).tz_convert("Asia/Dhaka").tz_localize(None)
+    if _fvg["type"] == "BULLISH FVG":
+        _fvg_color = "rgba(0, 160, 80, 0.14)"
+    else:
+        _fvg_color = "rgba(220, 60, 60, 0.14)"
+    fig.add_shape(type="rect", xref="paper", x0=0, x1=1,
+                  y0=_fvg["low"], y1=_fvg["high"],
+                  fillcolor=_fvg_color, line_width=0, layer="below")
+    fig.add_annotation(x=_fvg_time, y=(_fvg["low"] + _fvg["high"]) / 2,
+                       text=_fvg["type"], showarrow=False, font=dict(size=9))
 
 if trade:
     fig.add_hline(y=trade["entry"], annotation_text="ENTRY", line_dash="solid")
