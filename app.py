@@ -1794,10 +1794,31 @@ fig.add_trace(
 )
 
 if trade:
-    fig.add_hline(y=trade["entry"], annotation_text="Entry")
-    fig.add_hline(y=trade["sl"], annotation_text="SL")
-    fig.add_hline(y=trade["tp1"], annotation_text="TP1")
-    fig.add_hline(y=trade["tp2"], annotation_text="TP2")
+    fig.add_hline(y=trade["entry"], annotation_text="ENTRY", line_dash="solid")
+    fig.add_hline(y=trade["sl"], annotation_text="STOP LOSS", line_dash="dash")
+    fig.add_hline(y=trade["tp1"], annotation_text="TP1", line_dash="dot")
+    fig.add_hline(y=trade["tp2"], annotation_text="TP2", line_dash="dot")
+    fig.add_hline(y=trade["tp3"], annotation_text="TP3", line_dash="dot")
+
+    # Place a direction marker on the exact candle that generated the setup.
+    _signal_x = pd.to_datetime(signal_row["datetime"], utc=True).tz_convert("Asia/Dhaka").tz_localize(None)
+    _signal_y = float(signal_row["low"] if trade["direction"] == "BUY" else signal_row["high"])
+    _signal_in_chart = bool((chart_df["datetime"] == _signal_x).any())
+    if _signal_in_chart:
+        fig.add_trace(go.Scatter(
+            x=[_signal_x],
+            y=[_signal_y],
+            mode="markers+text",
+            name=f"{trade['direction']} signal",
+            text=[f"{trade['direction']}"],
+            textposition="bottom center" if trade["direction"] == "BUY" else "top center",
+            marker=dict(
+                symbol="triangle-up" if trade["direction"] == "BUY" else "triangle-down",
+                size=17,
+                line=dict(width=1),
+            ),
+            hovertemplate=f"{trade['direction']} setup<br>Time: %{{x}}<br>Price: %{{y:.2f}}<extra></extra>",
+        ))
 
 fig.update_layout(
     height=650,
