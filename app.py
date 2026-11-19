@@ -4,7 +4,8 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
-from datetime import datetime, timezone
+from datetime import datetime, timezone, time as dt_time
+from zoneinfo import ZoneInfo
 
 st.set_page_config(
     page_title="XAUUSD Gold Market Analysis",
@@ -53,6 +54,37 @@ def assess_live_data_freshness(df, interval="5min", max_age_minutes=20):
     except Exception as exc:
         result["message"] = f"Freshness check failed: {str(exc)[:100]}"
         return result
+
+
+def forex_session_status(now_utc=None):
+    """Return standard FX session status using each market's local clock and DST rules."""
+    now_utc = now_utc or datetime.now(timezone.utc)
+    sessions = [
+        ("Sydney", "Australia/Sydney", dt_time(8, 0), dt_time(17, 0)),
+        ("Tokyo", "Asia/Tokyo", dt_time(9, 0), dt_time(18, 0)),
+        ("London", "Europe/London", dt_time(8, 0), dt_time(17, 0)),
+        ("New York", "America/New_York", dt_time(8, 0), dt_time(17, 0)),
+    ]
+    result = []
+    for name, zone_name, start, end in sessions:
+        local_now = now_utc.astimezone(ZoneInfo(zone_name))
+        is_weekday = local_now.weekday() < 5
+        is_open = is_weekday and start <= local_now.time().replace(tzinfo=None) < end
+        next_open = None
+        if not is_open:
+            for day_offset in range(0, 8):
+                candidate_day = local_now.date() + pd.Timedelta(days=day_offset)
+                candidate = datetime.combine(candidate_day, start, tzinfo=ZoneInfo(zone_name))
+                if candidate > local_now and candidate.weekday() < 5:
+                    next_open = candidate
+                    break
+        result.append({
+            "name": name,
+            "open": is_open,
+            "local_time": local_now.strftime("%H:%M"),
+            "next_open": next_open,
+        })
+    return result
 
 
 def trade_result_from_path(entry, sl, tp, highs, lows, direction):
@@ -120,9 +152,27 @@ def smart_mtf_intervals(main_interval):
 
 st.title("🥇 XAUUSD Gold Live Analysis")
 st.caption(
-    "XAUUSD only · 5M analysis · closed-candle signals · gap-aware backtest. "
-    "Educational tool; historical results do not guarantee future performance."
+    "XAUUSD only · 5M live signals · 1:1 risk/reward · Bangladesh time. "
+    "Educational tool; signals are not guaranteed to win."
 )
+
+# Live session board. Session clocks use their own IANA time zones, so DST is automatic.
+_session_rows = forex_session_status()
+st.subheader("🌍 Live Forex Sessions")
+_session_cols = st.columns(4)
+for _col, _session in zip(_session_cols, _session_rows):
+    with _col:
+        _state = "🟢 OPEN" if _session["open"] else "⚪ CLOSED"
+        st.metric(_session["name"], _state, f"Local time {_session['local_time']}")
+        if not _session["open"] and _session["next_open"] is not None:
+            _next_dhaka = _session["next_open"].astimezone(ZoneInfo("Asia/Dhaka"))
+            st.caption("Next open BD: " + _next_dhaka.strftime("%a %H:%M"))
+_london_open = next(x["open"] for x in _session_rows if x["name"] == "London")
+_ny_open = next(x["open"] for x in _session_rows if x["name"] == "New York")
+if _london_open and _ny_open:
+    st.success("🔥 London + New York overlap is active")
+else:
+    st.caption("London / New York overlap is not active")
 
 # -----------------------------
 # Sidebar
@@ -165,9 +215,8 @@ with st.sidebar:
         value=1.0,
         step=0.1,
     )
-    rr1 = st.number_input("TP1 RR", min_value=0.5, max_value=10.0, value=1.0, step=0.5)
-    rr2 = st.number_input("TP2 RR", min_value=0.5, max_value=10.0, value=2.0, step=0.5)
-    rr3 = st.number_input("TP3 RR", min_value=0.5, max_value=10.0, value=3.0, step=0.5)
+    rr1 = rr2 = rr3 = 1.0
+    st.info("Fixed target: 1:1 Risk/Reward. TP1, TP2 and TP3 use the same 1R level.")
     estimated_cost_r = st.number_input(
         "Estimated round-trip cost (R)", min_value=0.0, max_value=0.50,
         value=0.05, step=0.01,
