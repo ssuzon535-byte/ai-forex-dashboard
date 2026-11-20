@@ -793,13 +793,51 @@ def get_signal(row, df, min_score=3, experiment=None):
             buy_retest = False
             sell_retest = False
 
-        # Short-term HH/HL and LH/LL structure, plus breakout/CHOCH confirmation.
-        recent_high, recent_low = float(recent5["high"].max()), float(recent5["low"].min())
-        prior_high, prior_low = float(prior5["high"].max()), float(prior5["low"].min())
-        bullish_structure = recent_high > prior_high and recent_low > prior_low
-        bearish_structure = recent_high < prior_high and recent_low < prior_low
-        buy_structure = bullish_structure or buy_breakout or (buy_sweep and c > previous_close)
-        sell_structure = bearish_structure or sell_breakout or (sell_sweep and c < previous_close)
+        # Confirmed swing structure: use only completed candles in history.
+        # A pivot at i is confirmed by the candle to its right, so the last
+        # completed bar cannot be used as an unconfirmed future pivot.
+        _swing_source = history.tail(80).reset_index(drop=True)
+        _pivot_highs, _pivot_lows = [], []
+        for _i in range(1, len(_swing_source) - 1):
+            _prev, _cur, _next = _swing_source.iloc[_i - 1], _swing_source.iloc[_i], _swing_source.iloc[_i + 1]
+            if float(_cur["high"]) > float(_prev["high"]) and float(_cur["high"]) >= float(_next["high"]):
+                _pivot_highs.append(float(_cur["high"]))
+            if float(_cur["low"]) < float(_prev["low"]) and float(_cur["low"]) <= float(_next["low"]):
+                _pivot_lows.append(float(_cur["low"]))
+        _last_pivot_high = _pivot_highs[-1] if _pivot_highs else None
+        _prev_pivot_high = _pivot_highs[-2] if len(_pivot_highs) >= 2 else None
+        _last_pivot_low = _pivot_lows[-1] if _pivot_lows else None
+        _prev_pivot_low = _pivot_lows[-2] if len(_pivot_lows) >= 2 else None
+        _bull_hh_hl = (
+            _last_pivot_high is not None and _prev_pivot_high is not None
+            and _last_pivot_low is not None and _prev_pivot_low is not None
+            and _last_pivot_high > _prev_pivot_high and _last_pivot_low > _prev_pivot_low
+        )
+        _bear_lh_ll = (
+            _last_pivot_high is not None and _prev_pivot_high is not None
+            and _last_pivot_low is not None and _prev_pivot_low is not None
+            and _last_pivot_high < _prev_pivot_high and _last_pivot_low < _prev_pivot_low
+        )
+        _bull_bos = _last_pivot_high is not None and c > _last_pivot_high and previous_close <= _last_pivot_high
+        _bear_bos = _last_pivot_low is not None and c < _last_pivot_low and previous_close >= _last_pivot_low
+        buy_structure = _bull_hh_hl or _bull_bos
+        sell_structure = _bear_lh_ll or _bear_bos
+
+        # FVG reaction: a current live candle must trade into a recent completed
+        # three-candle imbalance and close back on the directional side.
+        _bull_fvg_reaction = False
+        _bear_fvg_reaction = False
+        _fvg_scan = history.tail(40).reset_index(drop=True)
+        for _j in range(2, len(_fvg_scan)):
+            _first, _third = _fvg_scan.iloc[_j - 2], _fvg_scan.iloc[_j]
+            if float(_third["low"]) > float(_first["high"]):
+                _zlo, _zhi = float(_first["high"]), float(_third["low"])
+                if l <= _zhi and h >= _zlo and c >= _zlo:
+                    _bull_fvg_reaction = True
+            if float(_third["high"]) < float(_first["low"]):
+                _zlo, _zhi = float(_third["high"]), float(_first["low"])
+                if h >= _zlo and l <= _zhi and c <= _zhi:
+                    _bear_fvg_reaction = True
 
         # Approximate demand/supply from recent swing extremes, with a proximity filter.
         demand_candle = recent20.loc[recent20["low"].idxmin()]
@@ -826,6 +864,8 @@ def get_signal(row, df, min_score=3, experiment=None):
 
         buy_price_action = bullish_rejection or buy_breakout or buy_retest
         sell_price_action = bearish_rejection or sell_breakout or sell_retest
+        buy_zone = buy_zone or _bull_fvg_reaction
+        sell_zone = sell_zone or _bear_fvg_reaction
         buy_checks = {
             "Price action (rejection / breakout / retest)": bool(buy_price_action),
             "Liquidity sweep": bool(buy_sweep),
@@ -894,6 +934,14 @@ def get_signal(row, df, min_score=3, experiment=None):
                 reasons.append("Price Action: Retest (SELL)")
         if not volume_available:
             reasons.append("Volume unavailable from data provider; volume factor omitted")
+        if _bull_bos:
+            reasons.append("Bullish BOS: close above confirmed swing high")
+        if _bear_bos:
+            reasons.append("Bearish BOS: close below confirmed swing low")
+        if _bull_fvg_reaction:
+            reasons.append("Bullish FVG mitigation reaction")
+        if _bear_fvg_reaction:
+            reasons.append("Bearish FVG mitigation reaction")
         if buy_breakout or sell_breakout:
             reasons.append("Confirmed close beyond prior 20-candle level")
         if buy_retest or sell_retest:
