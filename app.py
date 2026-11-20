@@ -827,8 +827,24 @@ def get_signal(row, df, min_score=3, experiment=None):
         support20 = float(recent20["low"].min())
         previous_close = float(history.iloc[-1]["close"])
 
-        buy_sweep = l < support10 and c > support10
-        sell_sweep = h > resistance10 and c < resistance10
+        # Require a meaningful wick-through and rejection back inside the
+        # prior 10-candle liquidity range. Tiny one-tick breaches are ignored.
+        sweep_buffer = max(0.05 * atr, 1e-8)
+        close_location = (c - l) / max(h - l, 1e-12)
+        buy_sweep_depth = support10 - l
+        sell_sweep_depth = h - resistance10
+        buy_sweep = (
+            l < support10
+            and c > support10
+            and buy_sweep_depth >= sweep_buffer
+            and close_location >= 0.60
+        )
+        sell_sweep = (
+            h > resistance10
+            and c < resistance10
+            and sell_sweep_depth >= sweep_buffer
+            and close_location <= 0.40
+        )
         buy_breakout = c > resistance20 and previous_close <= resistance20
         sell_breakout = c < support20 and previous_close >= support20
         # Retest must use the breakout level that existed BEFORE the
