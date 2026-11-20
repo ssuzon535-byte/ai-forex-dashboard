@@ -193,11 +193,11 @@ with st.sidebar:
         help="Loads up to 1,000 candles for a larger historical backtest sample. More candles improve sample size, not signal accuracy by themselves.",
     )
 
-    signal_mode = st.radio(
-        "Signal mode",
-        ["Closed candle (stable)", "Live candle (provisional)"],
-        index=0,
-        help="Default uses the last completed 5M candle to avoid signals changing inside an unfinished candle.",
+    signal_mode = "Live candle (locked)"
+    st.info(
+        "Live 5M candle analysis is enabled. The first confirmed BUY/SELL signal is locked "
+        "for the rest of that candle and will not flip with price movement. A new candle "
+        "starts a fresh analysis."
     )
 
     st.divider()
@@ -1355,14 +1355,11 @@ with st.expander("🧪 Twelve Data API / Market Data Validation", expanded=False
         else:
             st.success(f"PASS: {len(raw_df)} cleaned candles passed timestamp, ordering, positive-price and OHLC checks.")
 
-# Use closed candle by default to reduce signal flipping/repainting.
-if signal_mode == "Closed candle (stable)" and len(df) >= 2:
-    signal_index = -2
-else:
-    signal_index = -1
-
+# Always analyze the currently forming 5M candle. A directional signal is
+# locked once per candle below, so intrabar price movement cannot flip it.
+signal_index = -1
 signal_row = df.iloc[signal_index]
-signal_history_df = df.iloc[: len(df) - 1] if signal_index == -2 else df
+signal_history_df = df
 
 signal_info = get_signal(
     signal_row,
@@ -1384,24 +1381,6 @@ trade = build_trade(
     rr2,
     rr3,
 )
-
-# In stable closed-candle mode, enter at the next candle's open, matching backtest.
-# Live-candle mode remains provisional and uses the currently forming candle close.
-if trade and signal_mode == "Closed candle (stable)" and len(df) >= 2:
-    next_open = float(df.iloc[-1]["open"])
-    risk_distance = float(trade["risk_distance"])
-    if np.isfinite(next_open) and risk_distance > 0:
-        trade["entry"] = next_open
-        if trade["direction"] == "BUY":
-            trade["sl"] = next_open - risk_distance
-            trade["tp1"] = next_open + risk_distance * rr1
-            trade["tp2"] = next_open + risk_distance * rr2
-            trade["tp3"] = next_open + risk_distance * rr3
-        else:
-            trade["sl"] = next_open + risk_distance
-            trade["tp1"] = next_open - risk_distance * rr1
-            trade["tp2"] = next_open - risk_distance * rr2
-            trade["tp3"] = next_open - risk_distance * rr3
 
 # -----------------------------
 # MTF confirmation
@@ -1446,6 +1425,36 @@ elif mtf_enabled:
 if final_signal != signal_info["signal"]:
     trade = None
 
+# Lock the first actionable live-candle signal and its exact trade levels until
+# this 5M candle ends. This prevents BUY/SELL flips and moving entry/SL/TP lines.
+live_candle_key = pd.to_datetime(df.iloc[-1]["datetime"], utc=True).isoformat()
+locked_state = st.session_state.get("locked_live_signal")
+if locked_state and locked_state.get("candle_key") != live_candle_key:
+    st.session_state.pop("locked_live_signal", None)
+    locked_state = None
+
+if locked_state:
+    final_signal = locked_state["signal"]
+    signal_info = locked_state["signal_info"].copy()
+    trade = locked_state.get("trade")
+    if not live_data_status["ok"]:
+        trade = None
+    signal_locked = True
+elif (
+    live_data_status["ok"]
+    and final_signal in ("BUY", "STRONG BUY", "SELL", "STRONG SELL")
+    and trade is not None
+):
+    st.session_state["locked_live_signal"] = {
+        "candle_key": live_candle_key,
+        "signal": final_signal,
+        "signal_info": signal_info.copy(),
+        "trade": trade.copy(),
+    }
+    signal_locked = True
+else:
+    signal_locked = False
+
 # -----------------------------
 # Header metrics
 # -----------------------------
@@ -1480,7 +1489,8 @@ else:
 st.caption(
     f"Current 5M candle: {candle_open_time.strftime('%Y-%m-%d %H:%M:%S')} BD time | "
     f"Next candle in: {countdown_text} | Auto-refresh: 60 sec | "
-    f"Last analysis candle: {price_time_display} | Mode: {signal_mode}"
+    f"Last analysis candle: {price_time_display} | Mode: {signal_mode} | "
+    f"Signal lock: {'ON' if signal_locked else 'WAITING FOR CONFIRMATION'}"
 )
 
 
