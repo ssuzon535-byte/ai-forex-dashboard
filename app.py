@@ -2006,6 +2006,64 @@ fig.add_trace(
     )
 )
 
+# Liquidity sweep markers: each completed candle is compared only with
+# the 10 candles immediately before it (no look-ahead).
+_sweep_source = _overlay_df.tail(180).copy().reset_index(drop=True)
+_bull_sweep_x, _bull_sweep_y, _bear_sweep_x, _bear_sweep_y = [], [], [], []
+if len(_sweep_source) >= 11:
+    for _i in range(10, len(_sweep_source)):
+        _bar = _sweep_source.iloc[_i]
+        _prior = _sweep_source.iloc[_i - 10:_i]
+        _prior_low = float(_prior["low"].min())
+        _prior_high = float(_prior["high"].max())
+        _bar_time = pd.to_datetime(_bar["datetime"], utc=True).tz_convert("Asia/Dhaka").tz_localize(None)
+        if float(_bar["low"]) < _prior_low and float(_bar["close"]) > _prior_low:
+            _bull_sweep_x.append(_bar_time)
+            _bull_sweep_y.append(float(_bar["low"]))
+        if float(_bar["high"]) > _prior_high and float(_bar["close"]) < _prior_high:
+            _bear_sweep_x.append(_bar_time)
+            _bear_sweep_y.append(float(_bar["high"]))
+
+if _bull_sweep_x:
+    fig.add_trace(go.Scatter(
+        x=_bull_sweep_x, y=_bull_sweep_y, mode="markers",
+        name="Bullish Liquidity Sweep",
+        marker=dict(symbol="triangle-up", size=11, color="#16a34a"),
+        hovertemplate="Bullish liquidity sweep<br>%{x}<br>Low: %{y:.2f}<extra></extra>",
+    ))
+if _bear_sweep_x:
+    fig.add_trace(go.Scatter(
+        x=_bear_sweep_x, y=_bear_sweep_y, mode="markers",
+        name="Bearish Liquidity Sweep",
+        marker=dict(symbol="triangle-down", size=11, color="#dc2626"),
+        hovertemplate="Bearish liquidity sweep<br>%{x}<br>High: %{y:.2f}<extra></extra>",
+    ))
+
+# Confirmed 3-candle swing pivots for trendlines. The right-hand candle
+# confirms each pivot; only completed bars are used.
+_pivot_high_points, _pivot_low_points = [], []
+if len(_sweep_source) >= 3:
+    for _i in range(1, len(_sweep_source) - 1):
+        _prev, _cur, _next = _sweep_source.iloc[_i - 1], _sweep_source.iloc[_i], _sweep_source.iloc[_i + 1]
+        _pivot_time = pd.to_datetime(_cur["datetime"], utc=True).tz_convert("Asia/Dhaka").tz_localize(None)
+        if float(_cur["high"]) > float(_prev["high"]) and float(_cur["high"]) >= float(_next["high"]):
+            _pivot_high_points.append((_pivot_time, float(_cur["high"])))
+        if float(_cur["low"]) < float(_prev["low"]) and float(_cur["low"]) <= float(_next["low"]):
+            _pivot_low_points.append((_pivot_time, float(_cur["low"])))
+
+for _points, _label, _color in [
+    (_pivot_low_points, "Swing Low Trendline", "#16a34a"),
+    (_pivot_high_points, "Swing High Trendline", "#dc2626"),
+]:
+    if len(_points) >= 2:
+        _p1, _p2 = _points[-2], _points[-1]
+        fig.add_trace(go.Scatter(
+            x=[_p1[0], _p2[0]], y=[_p1[1], _p2[1]],
+            mode="lines", name=_label,
+            line=dict(color=_color, width=2, dash="dash"),
+            hovertemplate=f"{_label}<br>%{{x}}<br>%{{y:.2f}}<extra></extra>",
+        ))
+
 # Recent support/resistance from completed candles (not future-looking).
 if len(_overlay_df) >= 20:
     _support_level = float(_overlay_df["low"].tail(20).min())
@@ -2022,7 +2080,8 @@ for _fvg in _overlay_fvgs[-4:]:
         _fvg_color = "rgba(0, 160, 80, 0.14)"
     else:
         _fvg_color = "rgba(220, 60, 60, 0.14)"
-    fig.add_shape(type="rect", xref="paper", x0=0, x1=1,
+    _chart_right = chart_df["datetime"].iloc[-1] if not chart_df.empty else _fvg_time
+    fig.add_shape(type="rect", xref="x", x0=_fvg_time, x1=_chart_right,
                   y0=_fvg["low"], y1=_fvg["high"],
                   fillcolor=_fvg_color, line_width=0, layer="below")
     fig.add_annotation(x=_fvg_time, y=(_fvg["low"] + _fvg["high"]) / 2,
