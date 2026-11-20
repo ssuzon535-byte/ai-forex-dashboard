@@ -13,6 +13,65 @@ st.set_page_config(
     layout="wide",
 )
 
+# Responsive layout: compact mobile gutters, readable metrics, and cleaner cards.
+st.markdown("""
+<style>
+.block-container {
+    padding-top: 1.35rem;
+    padding-bottom: 2rem;
+    padding-left: clamp(0.75rem, 3vw, 2.5rem);
+    padding-right: clamp(0.75rem, 3vw, 2.5rem);
+    max-width: 1500px;
+}
+[data-testid="stMetric"] {
+    background: rgba(128, 128, 128, 0.07);
+    border: 1px solid rgba(128, 128, 128, 0.18);
+    border-radius: 0.7rem;
+    padding: 0.65rem 0.75rem;
+    min-width: 0;
+}
+[data-testid="stMetricLabel"] {
+    white-space: normal !important;
+    overflow-wrap: anywhere;
+    font-size: 0.82rem !important;
+}
+[data-testid="stMetricValue"] {
+    font-size: clamp(1.05rem, 2.3vw, 1.65rem) !important;
+    overflow-wrap: anywhere;
+}
+[data-testid="stDataFrame"], [data-testid="stTable"] {
+    max-width: 100%;
+}
+[data-testid="stPlotlyChart"] {
+    width: 100%;
+}
+@media (max-width: 768px) {
+    .block-container {
+        padding-top: 0.75rem;
+        padding-left: 0.65rem;
+        padding-right: 0.65rem;
+    }
+    [data-testid="stHorizontalBlock"] {
+        flex-wrap: wrap;
+        gap: 0.55rem;
+    }
+    [data-testid="stHorizontalBlock"] > [data-testid="column"] {
+        flex: 1 1 calc(50% - 0.55rem) !important;
+        min-width: calc(50% - 0.55rem) !important;
+    }
+    [data-testid="stMetric"] {
+        padding: 0.55rem;
+    }
+    h1 { font-size: 1.65rem !important; }
+    h2 { font-size: 1.25rem !important; }
+    h3 { font-size: 1.05rem !important; }
+    [data-testid="stSidebar"] {
+        min-width: 0;
+    }
+}
+</style>
+""", unsafe_allow_html=True)
+
 
 def safe_accuracy_pct(wins, total):
     """Return a bounded win-rate percentage; invalid counts return 0."""
@@ -1518,17 +1577,15 @@ next_candle_time = candle_open_time + pd.Timedelta(minutes=5)
 seconds_to_close = max(0, int((next_candle_time - live_now).total_seconds()))
 countdown_text = f"{seconds_to_close // 60:02d}:{seconds_to_close % 60:02d}"
 
-col1, col2, col3, col4, col5, col6 = st.columns(6)
-col1.metric("Live Price", f"{float(df.iloc[-1]['close']):.5f}")
-col2.metric("Signal", final_signal)
-col3.metric("Technical Score", f"{signal_info['score']}/{signal_info['max_score']}")
-col4.metric("Confluence", f"{signal_info['technical_score_pct']}%")
-col5.metric("Market Regime", regime)
-col6.metric("Bangladesh Time", live_now.strftime("%H:%M:%S"))
-col2.metric("Final Signal", final_signal)
-col3.metric("Technical Score", f"{signal_info['score']}/{signal_info['max_score']}")
-col4.metric("Confluence (not win probability)", f"{signal_info['technical_score_pct']}%")
-col5.metric("Regime", regime)
+# Two compact metric rows avoid six narrow columns and duplicate values.
+_m1, _m2, _m3 = st.columns(3)
+_m1.metric("Live Price", f"{float(df.iloc[-1]['close']):.2f}")
+_m2.metric("Final Signal", final_signal)
+_m3.metric("Technical Score", f"{signal_info['score']}/{signal_info['max_score']}")
+_m4, _m5, _m6 = st.columns(3)
+_m4.metric("Confluence (not win probability)", f"{signal_info['technical_score_pct']}%")
+_m5.metric("Market Regime", regime)
+_m6.metric("Bangladesh Time", live_now.strftime("%H:%M:%S"))
 
 if live_data_status["ok"]:
     st.success("Live data check: FRESH | " + live_data_status["message"])
@@ -1627,21 +1684,15 @@ if final_signal in ["BUY", "STRONG BUY", "SELL", "STRONG SELL"] and trade:
         risk_amount = account_balance * risk_pct / 100.0
         entry_txt = format_price(trade["entry"], symbol)
         sl_txt = format_price(trade["sl"], symbol)
-        tp1_txt = format_price(trade["tp1"], symbol)
-        tp2_txt = format_price(trade["tp2"], symbol)
-        tp3_txt = format_price(trade["tp3"], symbol)
+        tp_txt = format_price(trade["tp1"], symbol)
 
-        # Use two compact rows instead of five narrow columns so values remain
-        # readable on mobile screens and are not visually clipped/wrapped.
-        a, b, c = st.columns(3)
+        # One target is displayed because the selected risk/reward is fixed at 1:1.
+        a, b = st.columns(2)
         a.metric("Direction", trade["direction"])
         b.metric("Entry", entry_txt)
+        c, d = st.columns(2)
         c.metric("Stop Loss (SL)", sl_txt)
-
-        d, e, f = st.columns(3)
-        d.metric("Take Profit 1", tp1_txt)
-        e.metric("Take Profit 2", tp2_txt)
-        f.metric("Take Profit 3", tp3_txt)
+        d.metric("Take Profit (1:1)", tp_txt)
 
         st.caption(
             f"Risk distance: `{trade['risk_distance']:.5f}` | "
@@ -2115,7 +2166,7 @@ if trade:
         ))
 
 fig.update_layout(
-    height=650,
+    height=500,
     xaxis_rangeslider_visible=False,
     margin=dict(l=10, r=10, t=30, b=10),
     template="plotly_white",
