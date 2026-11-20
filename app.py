@@ -765,21 +765,36 @@ def higher_timeframe_trend(df, signal_time, signal_interval_minutes=5):
                  close=("close", "last"), count=("close", "count"))
             .dropna(subset=["open", "high", "low", "close"])
         )
-        hourly = hourly[(hourly["count"] >= 10) & (hourly.index <= candle_close)]
+        # Only use hourly bars whose right-edge timestamp is at or before
+        # the current 5M candle OPEN. This excludes the still-forming 1H bar.
+        completed_hour_cutoff = candle_open.floor("1h")
+        hourly = hourly[(hourly["count"] >= 10) & (hourly.index <= completed_hour_cutoff)]
         result["completed_bars"] = int(len(hourly))
-        if len(hourly) < 6:
-            result["reason"] = "Need at least 6 valid completed 1H candles"
+        if len(hourly) < 55:
+            result["reason"] = "Need at least 55 completed 1H candles for EMA and structure confirmation"
             return result
+
+        hourly = hourly.copy()
+        hourly["ema20"] = hourly["close"].ewm(span=20, adjust=False).mean()
+        hourly["ema50"] = hourly["close"].ewm(span=50, adjust=False).mean()
         recent, previous = hourly.tail(3), hourly.iloc[-6:-3]
         rh, rl = float(recent["high"].max()), float(recent["low"].min())
         ph, pl = float(previous["high"].max()), float(previous["low"].min())
-        last_close, first_recent_close = float(hourly.iloc[-1]["close"]), float(recent["close"].iloc[0])
-        if rh > ph and rl > pl and last_close >= first_recent_close:
-            result.update({"trend":"BULLISH","reason":"Completed 1H structure has higher highs and higher lows"})
-        elif rh < ph and rl < pl and last_close <= first_recent_close:
-            result.update({"trend":"BEARISH","reason":"Completed 1H structure has lower highs and lower lows"})
+        last = hourly.iloc[-1]
+        last_close = float(last["close"])
+        ema20, ema50 = float(last["ema20"]), float(last["ema50"])
+        prior_ema20 = float(hourly["ema20"].iloc[-4])
+        bullish_structure = rh > ph and rl > pl
+        bearish_structure = rh < ph and rl < pl
+        bullish_ema = last_close > ema20 > ema50 and ema20 > prior_ema20
+        bearish_ema = last_close < ema20 < ema50 and ema20 < prior_ema20
+
+        if bullish_structure and bullish_ema:
+            result.update({"trend":"BULLISH","reason":"Completed 1H HH/HL structure confirmed by close above rising EMA20/EMA50"})
+        elif bearish_structure and bearish_ema:
+            result.update({"trend":"BEARISH","reason":"Completed 1H LH/LL structure confirmed by close below falling EMA20/EMA50"})
         else:
-            result.update({"trend":"RANGE / MIXED","reason":"Completed 1H structure is mixed or ranging"})
+            result.update({"trend":"RANGE / MIXED","reason":"Completed 1H structure and EMA20/EMA50 are not aligned"})
         return result
     except Exception as exc:
         result["reason"] = f"1H filter error: {str(exc)[:100]}"
@@ -895,6 +910,12 @@ def get_signal(row, df, min_score=3, experiment=None):
         )
         _bull_bos = _last_pivot_high is not None and c > _last_pivot_high and previous_close <= _last_pivot_high
         _bear_bos = _last_pivot_low is not None and c < _last_pivot_low and previous_close >= _last_pivot_low
+        # CHOCH is a break against the preceding swing sequence; keep it
+        # distinct from continuation BOS for transparent confirmation reasons.
+        _prior_bearish_structure = _prev_pivot_high is not None and _last_pivot_high is not None and _last_pivot_high < _prev_pivot_high
+        _prior_bullish_structure = _prev_pivot_low is not None and _last_pivot_low is not None and _last_pivot_low > _prev_pivot_low
+        _bull_choch = _prior_bearish_structure and _bull_bos
+        _bear_choch = _prior_bullish_structure and _bear_bos
         buy_structure = _bull_hh_hl or _bull_bos
         sell_structure = _bear_lh_ll or _bear_bos
 
@@ -1009,10 +1030,14 @@ def get_signal(row, df, min_score=3, experiment=None):
                 reasons.append("Price Action: Retest (SELL)")
         if not volume_available:
             reasons.append("Volume unavailable from data provider; volume factor omitted")
-        if _bull_bos:
+        if _bull_bos and not _bull_choch:
             reasons.append("Bullish BOS: close above confirmed swing high")
-        if _bear_bos:
+        if _bear_bos and not _bear_choch:
             reasons.append("Bearish BOS: close below confirmed swing low")
+        if _bull_choch:
+            reasons.append("Bullish CHOCH: break against prior bearish swing sequence")
+        if _bear_choch:
+            reasons.append("Bearish CHOCH: break against prior bullish swing sequence")
         if _bull_fvg_reaction:
             reasons.append("Bullish FVG mitigation reaction")
         if _bear_fvg_reaction:
