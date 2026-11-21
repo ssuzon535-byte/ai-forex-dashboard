@@ -92,7 +92,7 @@ def assess_live_data_freshness(df, interval="5min", max_age_minutes=20):
     try:
         if df is None or len(df) < 2 or "datetime" not in df.columns:
             return result
-        minutes = {"5min": 5, "15min": 15, "1h": 60}.get(interval)
+        minutes = {"1min": 1, "5min": 5, "15min": 15, "1h": 60}.get(interval)
         if not minutes:
             result["message"] = "Unsupported timeframe for freshness check"
             return result
@@ -198,7 +198,7 @@ SYMBOLS = {
 }
 
 INTERVALS = {
-    "5M": "5min",
+    "1M": "1min",
 }
 
 def smart_mtf_intervals(main_interval):
@@ -212,7 +212,7 @@ def smart_mtf_intervals(main_interval):
 
 st.title("🥇 XAUUSD Gold Live Analysis")
 st.caption(
-    "XAUUSD only · 5M live signals · 1:1 risk/reward · Bangladesh time. "
+    "XAUUSD only · 1M entry + completed 5M trend filter · 1:1 risk/reward · Bangladesh time. "
     "Educational tool; signals are not guaranteed to win."
 )
 
@@ -242,9 +242,9 @@ with st.sidebar:
     symbol = "XAU/USD"
     st.info("Market: XAUUSD Gold only")
 
-    st.info("Analysis timeframe: 5M only")
-    timeframe_label = "5M"
-    interval = "5min"
+    st.info("Entry timeframe: 1M | Trend filter: completed 5M")
+    timeframe_label = "1M"
+    interval = "1min"
 
     outputsize = st.select_slider(
         "Candles to load",
@@ -255,9 +255,8 @@ with st.sidebar:
 
     signal_mode = "Live candle (locked)"
     st.info(
-        "Live 5M candle analysis is enabled. The first confirmed BUY/SELL signal is locked "
-        "for the rest of that candle and will not flip with price movement. A new candle "
-        "starts a fresh analysis."
+        "Live 1M candle analysis is enabled. The first confirmed BUY/SELL signal is locked "
+        "for the rest of that candle. A new 1M candle starts a fresh analysis."
     )
 
     st.divider()
@@ -285,7 +284,7 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Analysis timeframe")
-    st.caption("Entry: completed 5M candle | Trend filter: completed 1H candles reconstructed from loaded history.")
+    st.caption("Entry: live 1M candle | Trend filter: completed 5M candles reconstructed from loaded 1M history.")
     mtf_enabled = False
     strict_mtf = False
 
@@ -294,7 +293,7 @@ with st.sidebar:
         min_value=3,
         max_value=4,
         value=4,
-        help="High-confirmation mode requires at least 4 independent factors, a price-action/liquidity trigger and aligned 1H structure.",
+        help="Requires at least 4 confirmations. Counter-trend signals additionally need sweep + CHOCH + FVG reversal confirmation.",
     )
 
     if st.button("🔄 Refresh market data", use_container_width=True):
@@ -370,7 +369,7 @@ with st.sidebar:
             test_results.append(("BUY gap-through TP fill", resolve_bar_exit("BUY", 95, 110, 111, 113, 109) == ("WIN", 111.0)))
             test_results.append(("SELL gap-through TP fill", resolve_bar_exit("SELL", 105, 90, 89, 91, 87) == ("WIN", 89.0)))
             test_results.append(("Same-candle SL-first rule", resolve_bar_exit("BUY", 95, 110, 100, 111, 94) == ("LOSS", 95.0)))
-            test_results.append(("5M-only timeframe", INTERVALS == {"5M": "5min"}))
+            test_results.append(("1M-only entry timeframe", INTERVALS == {"1M": "1min"}))
             _fresh_test_df = pd.DataFrame({"datetime": [pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=10), pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=5)]})
             _fresh_result = assess_live_data_freshness(_fresh_test_df, "5min", 20)
             test_results.append(("Fresh 5M data accepted", _fresh_result["ok"]))
@@ -392,9 +391,9 @@ with st.sidebar:
     st.divider()
     st.subheader("🔌 XAUUSD API Connection")
     if st.button("🧪 Test XAUUSD API", use_container_width=True):
-        with st.spinner("Testing XAUUSD 5M data..."):
+        with st.spinner("Testing XAUUSD 1M data..."):
             api_results = test_twelve_data_api(
-                api_key, {"XAUUSD Gold": "XAU/USD"}, "5min"
+                api_key, {"XAUUSD Gold": "XAU/USD"}, "1min"
             )
         result = api_results["XAUUSD Gold"]
         if result["status"] == "OK":
@@ -518,6 +517,7 @@ def validate_market_data(df, interval):
     # Report unusually large gaps between candles. Forex weekend/holiday
     # closures can create legitimate gaps, so this is a warning, not a failure.
     expected_minutes = {
+        "1min": 1,
         "5min": 5,
         "15min": 15,
         "1h": 60,
@@ -740,9 +740,9 @@ def market_regime(row, df):
 # -----------------------------
 # Higher-timeframe trend filter
 # -----------------------------
-def higher_timeframe_trend(df, signal_time, signal_interval_minutes=5):
-    """Infer 1H structure from completed 5M candles only; never use future bars."""
-    result = {"trend": "UNAVAILABLE", "completed_bars": 0, "reason": "Not enough completed 1H candles"}
+def higher_timeframe_trend(df, signal_time, signal_interval_minutes=1):
+    """Infer 5M structure from completed 1M candles only; never use future bars."""
+    result = {"trend": "UNAVAILABLE", "completed_bars": 0, "reason": "Not enough completed 5M candles"}
     try:
         if df is None or df.empty or "datetime" not in df.columns:
             return result
@@ -751,7 +751,7 @@ def higher_timeframe_trend(df, signal_time, signal_interval_minutes=5):
         for column in ("open", "high", "low", "close"):
             work[column] = pd.to_numeric(work[column], errors="coerce")
         work = work.dropna().sort_values("datetime")
-        if len(work) < 72:
+        if len(work) < 275:
             return result
         candle_open = pd.to_datetime(signal_time, utc=True, errors="coerce")
         if pd.isna(candle_open):
@@ -760,18 +760,19 @@ def higher_timeframe_trend(df, signal_time, signal_interval_minutes=5):
         candle_close = candle_open + pd.Timedelta(minutes=int(signal_interval_minutes))
         hourly = (
             work.set_index("datetime")
-            .resample("1h", label="right", closed="left")
+            .resample("5min", label="right", closed="left")
             .agg(open=("open", "first"), high=("high", "max"), low=("low", "min"),
                  close=("close", "last"), count=("close", "count"))
             .dropna(subset=["open", "high", "low", "close"])
         )
-        # Only use hourly bars whose right-edge timestamp is at or before
-        # the current 5M candle OPEN. This excludes the still-forming 1H bar.
-        completed_hour_cutoff = candle_open.floor("1h")
-        hourly = hourly[(hourly["count"] >= 10) & (hourly.index <= completed_hour_cutoff)]
+        # Use only fully completed 5M candles. A 5M bar is complete only
+        # when all five 1M source candles are present and its right edge
+        # is at or before the current 1M candle opening bucket.
+        completed_5m_cutoff = candle_open.floor("5min")
+        hourly = hourly[(hourly["count"] >= 5) & (hourly.index <= completed_5m_cutoff)]
         result["completed_bars"] = int(len(hourly))
         if len(hourly) < 55:
-            result["reason"] = "Need at least 55 completed 1H candles for EMA and structure confirmation"
+            result["reason"] = "Need at least 55 completed 5M candles for EMA and structure confirmation"
             return result
 
         hourly = hourly.copy()
@@ -790,14 +791,14 @@ def higher_timeframe_trend(df, signal_time, signal_interval_minutes=5):
         bearish_ema = last_close < ema20 < ema50 and ema20 < prior_ema20
 
         if bullish_structure and bullish_ema:
-            result.update({"trend":"BULLISH","reason":"Completed 1H HH/HL structure confirmed by close above rising EMA20/EMA50"})
+            result.update({"trend":"BULLISH","reason":"Completed 5M HH/HL structure confirmed by close above rising EMA20/EMA50"})
         elif bearish_structure and bearish_ema:
-            result.update({"trend":"BEARISH","reason":"Completed 1H LH/LL structure confirmed by close below falling EMA20/EMA50"})
+            result.update({"trend":"BEARISH","reason":"Completed 5M LH/LL structure confirmed by close below falling EMA20/EMA50"})
         else:
-            result.update({"trend":"RANGE / MIXED","reason":"Completed 1H structure and EMA20/EMA50 are not aligned"})
+            result.update({"trend":"RANGE / MIXED","reason":"Completed 5M structure and EMA20/EMA50 are not aligned"})
         return result
     except Exception as exc:
-        result["reason"] = f"1H filter error: {str(exc)[:100]}"
+        result["reason"] = f"5M filter error: {str(exc)[:100]}"
         return result
 
 
@@ -994,14 +995,22 @@ def get_signal(row, df, min_score=3, experiment=None):
             signal = "WAIT"
 
         candidate_signal = signal
-        htf = higher_timeframe_trend(df, row.get("datetime"), signal_interval_minutes=5)
+        htf = higher_timeframe_trend(df, row.get("datetime"), signal_interval_minutes=1)
         htf_trend, htf_reason = htf["trend"], htf["reason"]
         htf_aligned = ((candidate_signal.endswith("BUY") and htf_trend == "BULLISH")
                        or (candidate_signal.endswith("SELL") and htf_trend == "BEARISH"))
         if candidate_signal.endswith("BUY") and htf_trend != "BULLISH":
-            signal = "WAIT"
+            if not (buy_sweep and _bull_choch and _bull_fvg_reaction):
+                signal = "WAIT"
+            else:
+                reasons_reversal = ["5M counter-trend override: bullish sweep + CHOCH + FVG"]
         elif candidate_signal.endswith("SELL") and htf_trend != "BEARISH":
-            signal = "WAIT"
+            if not (sell_sweep and _bear_choch and _bear_fvg_reaction):
+                signal = "WAIT"
+            else:
+                reasons_reversal = ["5M counter-trend override: bearish sweep + CHOCH + FVG"]
+        else:
+            reasons_reversal = []
 
         if signal.endswith("BUY"):
             selected = buy_checks
@@ -1011,7 +1020,8 @@ def get_signal(row, df, min_score=3, experiment=None):
             selected = buy_checks if buy_score >= sell_score else sell_checks
 
         reasons = [name for name, passed in selected.items() if passed]
-        reasons.append(f"1H trend: {htf_trend} ({htf_reason})")
+        reasons.append(f"5M trend: {htf_trend} ({htf_reason})")
+        reasons.extend(locals().get("reasons_reversal", []))
         # Record the exact price-action subtype for later win/loss attribution.
         # Use only the chosen direction so opposite-side patterns are not credited.
         if signal.endswith("BUY"):
@@ -1066,7 +1076,7 @@ def get_signal(row, df, min_score=3, experiment=None):
             "candle": candle,
             "quality_failures": (
                 [name for name, passed in selected.items() if not passed]
-                + (["1H trend not aligned or unavailable"] if candidate_signal != "WAIT" and not htf_aligned else [])
+                + (["5M trend not aligned and strict reversal confirmation missing"] if candidate_signal != "WAIT" and not htf_aligned and signal == "WAIT" else [])
             ),
             "htf_trend": htf_trend,
             "htf_reason": htf_reason,
@@ -1237,7 +1247,7 @@ def update_live_signal_history(signal, trade_setup, signal_time, market_df):
 # Backtest
 # -----------------------------
 def expected_interval_minutes(interval):
-    return {"5min": 5, "15min": 15, "1h": 60}.get(interval)
+    return {"1min": 1, "5min": 5, "15min": 15, "1h": 60}.get(interval)
 
 
 def backtest(df, min_score=6, rr=2.0, cost_r=0.05, interval=None, start_index=None, end_index=None, experiment=None):
@@ -1504,7 +1514,7 @@ with st.expander("🧪 Twelve Data API / Market Data Validation", expanded=False
         else:
             st.success(f"PASS: {len(raw_df)} cleaned candles passed timestamp, ordering, positive-price and OHLC checks.")
 
-# Always analyze the currently forming 5M candle. A directional signal is
+# Always analyze the currently forming 1M candle. A directional signal is
 # locked once per candle below, so intrabar price movement cannot flip it.
 signal_index = -1
 signal_row = df.iloc[signal_index]
@@ -1517,7 +1527,7 @@ signal_info = get_signal(
 )
 
 # Live safety gate: stale/future candle data must never produce an actionable signal.
-live_data_status = assess_live_data_freshness(df, interval=interval, max_age_minutes=20)
+live_data_status = assess_live_data_freshness(df, interval=interval, max_age_minutes=3)
 if not live_data_status["ok"]:
     signal_info["signal"] = "WAIT"
     signal_info["quality_failures"] = list(signal_info.get("quality_failures", []))
@@ -1575,7 +1585,7 @@ if final_signal != signal_info["signal"]:
     trade = None
 
 # Lock the first actionable live-candle signal and its exact trade levels until
-# this 5M candle ends. This prevents BUY/SELL flips and moving entry/SL/TP lines.
+# this 1M candle ends. This prevents BUY/SELL flips and moving entry/SL/TP lines.
 live_candle_key = pd.to_datetime(df.iloc[-1]["datetime"], utc=True).isoformat()
 locked_state = st.session_state.get("locked_live_signal")
 if locked_state and locked_state.get("candle_key") != live_candle_key:
@@ -1634,7 +1644,7 @@ else:
     st.warning("Live data check: " + live_data_status["status"] + " | " + live_data_status["message"] + ". New BUY/SELL signals are blocked until fresh data arrives.")
 
 st.caption(
-    f"Current 5M candle: {candle_open_time.strftime('%Y-%m-%d %H:%M:%S')} BD time | "
+    f"Current 1M candle: {candle_open_time.strftime('%Y-%m-%d %H:%M:%S')} BD time | "
     f"Next candle in: {countdown_text} | Auto-refresh: 60 sec | "
     f"Last analysis candle: {price_time_display} | Mode: {signal_mode} | "
     f"Live candle age: {live_data_status['age_minutes']} min | "
@@ -1642,7 +1652,7 @@ st.caption(
 )
 
 
-# Rolling one-hour live signal journal. Only unique 5M signal candles are stored.
+# Rolling one-hour live signal journal. Only unique 1M signal candles are stored.
 _live_history = update_live_signal_history(
     final_signal, trade, signal_row["datetime"], df
 )
@@ -1672,9 +1682,9 @@ with st.expander("🔎 কেন BUY/SELL আসছে না? (Signal diagnosti
     _d1.metric("BUY score", f"{signal_info.get('buy_score', 0)}/{signal_info.get('max_score', 0)}")
     _d2.metric("SELL score", f"{signal_info.get('sell_score', 0)}/{signal_info.get('max_score', 0)}")
     _d3.metric("Required score", str(min_score))
-    st.write("BUY/SELL পেতে কমপক্ষে ৪টি confirmation, Price Action/Liquidity trigger এবং completed 1H trend alignment প্রয়োজন।")
-    st.metric("Completed 1H Trend", signal_info.get("htf_trend", "UNAVAILABLE"))
-    st.caption(f"Valid completed 1H candles: {signal_info.get('htf_bars', 0)}")
+    st.write("BUY/SELL পেতে কমপক্ষে ৪টি confirmation প্রয়োজন। 5M trend-এর বিপরীতে signal হলে sweep + CHOCH + FVG একসাথে লাগবে।")
+    st.metric("Completed 5M Trend", signal_info.get("htf_trend", "UNAVAILABLE"))
+    st.caption(f"Valid completed 5M candles: {signal_info.get('htf_bars', 0)}")
     if signal_info.get("reasons"):
         st.write("Detected: " + ", ".join(signal_info["reasons"]))
     if signal_info.get("quality_failures"):
@@ -1682,7 +1692,7 @@ with st.expander("🔎 কেন BUY/SELL আসছে না? (Signal diagnosti
     if final_signal == "WAIT":
         st.warning("এখনো নির্ধারিত score ও trigger একসাথে মেলেনি। শুধু signal বাড়ানোর জন্য জোর করে BUY/SELL দেখানো হচ্ছে না।")
 
-st.caption("Live candle mode: first qualified BUY/SELL is locked for the current 5M candle. WAIT remains WAIT until a setup meets all confirmation rules.")
+st.caption("Live candle mode: first qualified BUY/SELL is locked for the current 1M candle. WAIT remains WAIT until a setup meets all confirmation rules.")
 
 # -----------------------------
 # Final setup card
@@ -2069,7 +2079,7 @@ with right:
 # -----------------------------
 # Chart
 # -----------------------------
-st.subheader("📉 Live XAUUSD 5M Candlestick Chart")
+st.subheader("📉 Live XAUUSD 1M Candlestick Chart")
 
 chart_df = df.tail(min(180, len(df))).copy()
 # Use completed candles for structure overlays and FVG detection.
