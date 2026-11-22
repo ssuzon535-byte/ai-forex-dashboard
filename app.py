@@ -806,8 +806,8 @@ def higher_timeframe_trend(df, signal_time, signal_interval_minutes=1):
 # Signal engine
 # -----------------------------
 def get_signal(row, df, min_score=3, experiment=None):
-    """Five-factor XAUUSD 5M engine using confirmed candles and past-only levels."""
-    empty = {"signal":"WAIT","score":0,"max_score":4,"technical_score_pct":0,
+    """Eight-factor XAUUSD 1M engine combining Price Action, SMC and ICT."""
+    empty = {"signal":"WAIT","score":0,"max_score":8,"technical_score_pct":0,
              "buy_score":0,"sell_score":0,"reasons":[],
              "regime":"STRUCTURE UNKNOWN","candle":"Unknown","quality_failures":[],
              "htf_trend":"UNAVAILABLE","htf_reason":"Not calculated","htf_bars":0}
