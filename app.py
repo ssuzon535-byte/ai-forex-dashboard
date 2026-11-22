@@ -2269,10 +2269,10 @@ if len(_ob_data) >= 5:
         _future = _ob_data.iloc[_oi + 1:_oi + 4]
         _ob_o, _ob_c = float(_ob["open"]), float(_ob["close"])
         _ob_hi, _ob_lo = float(_ob["high"]), float(_ob["low"])
-        if _ob_c < _ob_o and float(_future["close"].max()) > _ob_hi + 0.8 * float(atr_value):
-            _ob_bull.append((_ob["datetime"], min(_ob_o, _ob_c, _ob_hi), max(_ob_o, _ob_c)))
-        elif _ob_c > _ob_o and float(_future["close"].min()) < _ob_lo - 0.8 * float(atr_value):
-            _ob_bear.append((_ob["datetime"], min(_ob_o, _ob_c), max(_ob_o, _ob_c, _ob_lo)))
+        if _ob_c < _ob_o and float(_future["close"].max()) > _ob_hi + 0.8 * float(_overlay_df["ATR"].iloc[-1]):
+            _ob_bull.append((_ob["datetime"], _ob_lo, _ob_o))
+        elif _ob_c > _ob_o and float(_future["close"].min()) < _ob_lo - 0.8 * float(_overlay_df["ATR"].iloc[-1]):
+            _ob_bear.append((_ob["datetime"], _ob_o, _ob_hi))
 for _ob_list, _ob_name, _ob_color in [
     (_ob_bull[-2:], "Bullish Order Block", "rgba(22,163,74,0.16)"),
     (_ob_bear[-2:], "Bearish Order Block", "rgba(220,38,38,0.16)"),
