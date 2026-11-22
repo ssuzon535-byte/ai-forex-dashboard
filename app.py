@@ -1684,6 +1684,13 @@ _m4.metric("Confluence (not win probability)", f"{signal_info['technical_score_p
 _m5.metric("Market Regime", regime)
 _m6.metric("Bangladesh Time", live_now.strftime("%H:%M:%S"))
 
+# Show live directional scores separately from the count of signals already generated.
+_score_cols = st.columns(3)
+_score_cols[0].metric("Live BUY Score", f"{signal_info.get('buy_score', 0)}/{signal_info.get('max_score', 8)}")
+_score_cols[1].metric("Live SELL Score", f"{signal_info.get('sell_score', 0)}/{signal_info.get('max_score', 8)}")
+_score_cols[2].metric("Completed 5M Trend", signal_info.get("htf_trend", "UNAVAILABLE"))
+st.caption("এই BUY/SELL score হলো বর্তমান 1M candle-এর analysis; এটি তৈরি হওয়া signal-এর সংখ্যা নয়। 5M Trend আলাদা filter হিসেবে দেখানো হয়েছে।")
+
 if live_data_status["ok"]:
     st.success("Live data check: FRESH | " + live_data_status["message"])
 else:
@@ -1698,20 +1705,26 @@ st.caption(
 )
 
 
-# Rolling one-hour live signal journal. Only unique 1M signal candles are stored.
+# Rolling one-hour signal history: generated BUY/SELL events, not live scores.
 _live_history = update_live_signal_history(
     final_signal, trade, signal_row["datetime"], df
 )
+_live_buy_count = sum(x["direction"] == "BUY" for x in _live_history)
+_live_sell_count = sum(x["direction"] == "SELL" for x in _live_history)
 _live_wins = sum(x["status"] == "WIN" for x in _live_history)
 _live_losses = sum(x["status"] == "LOSS" for x in _live_history)
 _live_open = sum(x["status"] == "OPEN" for x in _live_history)
 _live_expired = sum(x["status"] == "EXPIRED" for x in _live_history)
-st.subheader("⏱️ Last 1 Hour Live Signal Story")
+st.subheader("⏱️ Signal History (Rolling Last 1 Hour)")
+st.caption("এখানে শুধু গত ১ ঘণ্টায় তৈরি হওয়া BUY/SELL signal-এর হিসাব দেখানো হয়। বর্তমান BUY/SELL score উপরের Live Analysis অংশে আলাদা।")
 _h1, _h2, _h3, _h4 = st.columns(4)
-_h1.metric("WIN", _live_wins)
-_h2.metric("LOSS", _live_losses)
-_h3.metric("OPEN", _live_open)
-_h4.metric("EXPIRED", _live_expired)
+_h1.metric("BUY Signals", _live_buy_count)
+_h2.metric("SELL Signals", _live_sell_count)
+_h3.metric("WIN", _live_wins)
+_h4.metric("LOSS", _live_losses)
+_h5, _h6 = st.columns(2)
+_h5.metric("OPEN", _live_open)
+_h6.metric("EXPIRED", _live_expired)
 if _live_history:
     _journal = pd.DataFrame(_live_history)
     _journal["Signal time (BD)"] = pd.to_datetime(_journal["signal_time"], utc=True).dt.tz_convert("Asia/Dhaka").dt.strftime("%H:%M:%S")
@@ -1720,13 +1733,13 @@ if _live_history:
     _journal["TP (1:1)"] = _journal["tp"].map(lambda x: f"{x:.2f}")
     st.dataframe(_journal[["Signal time (BD)", "direction", "Entry", "SL", "TP (1:1)", "status"]], use_container_width=True, hide_index=True)
 else:
-    st.info("শেষ ১ ঘণ্টায় এখনো কোনো নতুন BUY/SELL signal তৈরি হয়নি।")
-st.caption("প্রতিটি signal একবারই গণনা হয়। TP বা SL না লাগলে OPEN থাকবে; ১ ঘণ্টা পর EXPIRED হবে এবং এক ঘণ্টার window থেকে বাদ যাবে।")
+    st.info("শেষ ১ ঘণ্টায় কোনো BUY/SELL signal তৈরি হয়নি। বর্তমান score থাকলেও score threshold ও confirmation না মিললে signal count 0-ই থাকবে।")
+st.caption("প্রতিটি 1M signal candle একবারই গণনা হয়। TP/SL না লাগলে OPEN থাকে; ১ ঘণ্টা পরে EXPIRED হয়।")
 
 with st.expander("🔎 কেন BUY/SELL আসছে না? (Signal diagnostics)", expanded=(final_signal == "WAIT")):
     _d1, _d2, _d3 = st.columns(3)
-    _d1.metric("BUY score", f"{signal_info.get('buy_score', 0)}/{signal_info.get('max_score', 0)}")
-    _d2.metric("SELL score", f"{signal_info.get('sell_score', 0)}/{signal_info.get('max_score', 0)}")
+    _d1.metric("BUY score", f"{signal_info.get('buy_score', 0)}/{signal_info.get('max_score', 8)}")
+    _d2.metric("SELL score", f"{signal_info.get('sell_score', 0)}/{signal_info.get('max_score', 8)}")
     _d3.metric("Required score", str(min_score))
     st.write("BUY/SELL পেতে কমপক্ষে ৪টি confirmation প্রয়োজন। 5M trend-এর বিপরীতে signal হলে sweep + CHOCH + FVG একসাথে লাগবে।")
     st.metric("Completed 5M Trend", signal_info.get("htf_trend", "UNAVAILABLE"))
