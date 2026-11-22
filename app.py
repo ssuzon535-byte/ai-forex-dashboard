@@ -1670,7 +1670,7 @@ regime = signal_info["regime"]
 
 live_now = pd.Timestamp.now(tz="Asia/Dhaka")
 candle_open_time = pd.Timestamp(df.iloc[-1]["datetime"]).tz_convert("Asia/Dhaka")
-next_candle_time = candle_open_time + pd.Timedelta(minutes=5)
+next_candle_time = candle_open_time + pd.Timedelta(minutes=1)
 seconds_to_close = max(0, int((next_candle_time - live_now).total_seconds()))
 countdown_text = f"{seconds_to_close // 60:02d}:{seconds_to_close % 60:02d}"
 
