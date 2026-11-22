@@ -2243,6 +2243,65 @@ for _fvg in _overlay_fvgs[-4:]:
     fig.add_annotation(x=_fvg_time, y=(_fvg["low"] + _fvg["high"]) / 2,
                        text=_fvg["type"], showarrow=False, font=dict(size=9))
 
+# ICT Premium / Discount dealing range from completed candles.
+if len(_overlay_df) >= 20 and not chart_df.empty:
+    _pd_window = _overlay_df.tail(50)
+    _pd_high = float(_pd_window["high"].max())
+    _pd_low = float(_pd_window["low"].min())
+    _pd_eq = (_pd_high + _pd_low) / 2.0
+    _chart_left = chart_df["datetime"].iloc[0]
+    _chart_right = chart_df["datetime"].iloc[-1]
+    fig.add_shape(type="rect", xref="x", x0=_chart_left, x1=_chart_right,
+                  y0=_pd_low, y1=_pd_eq, fillcolor="rgba(22,163,74,0.06)",
+                  line_width=0, layer="below")
+    fig.add_shape(type="rect", xref="x", x0=_chart_left, x1=_chart_right,
+                  y0=_pd_eq, y1=_pd_high, fillcolor="rgba(220,38,38,0.06)",
+                  line_width=0, layer="below")
+    fig.add_hline(y=_pd_eq, line_dash="dot", line_color="#64748b",
+                  annotation_text="Equilibrium (50%)")
+
+# SMC Order Blocks: last opposite candle before a strong displacement.
+_ob_bull, _ob_bear = [], []
+_ob_data = _overlay_df.tail(45).reset_index(drop=True)
+if len(_ob_data) >= 5:
+    for _oi in range(max(0, len(_ob_data) - 18), len(_ob_data) - 3):
+        _ob = _ob_data.iloc[_oi]
+        _future = _ob_data.iloc[_oi + 1:_oi + 4]
+        _ob_o, _ob_c = float(_ob["open"]), float(_ob["close"])
+        _ob_hi, _ob_lo = float(_ob["high"]), float(_ob["low"])
+        if _ob_c < _ob_o and float(_future["close"].max()) > _ob_hi + 0.8 * float(atr_value):
+            _ob_bull.append((_ob["datetime"], min(_ob_o, _ob_c, _ob_hi), max(_ob_o, _ob_c)))
+        elif _ob_c > _ob_o and float(_future["close"].min()) < _ob_lo - 0.8 * float(atr_value):
+            _ob_bear.append((_ob["datetime"], min(_ob_o, _ob_c), max(_ob_o, _ob_c, _ob_lo)))
+for _ob_list, _ob_name, _ob_color in [
+    (_ob_bull[-2:], "Bullish Order Block", "rgba(22,163,74,0.16)"),
+    (_ob_bear[-2:], "Bearish Order Block", "rgba(220,38,38,0.16)"),
+]:
+    for _ob_time, _ob_low, _ob_high in _ob_list:
+        _ob_time = pd.to_datetime(_ob_time, utc=True).tz_convert("Asia/Dhaka").tz_localize(None)
+        fig.add_shape(type="rect", xref="x", x0=_ob_time, x1=_chart_right,
+                      y0=_ob_low, y1=_ob_high, fillcolor=_ob_color,
+                      line_width=1, layer="below")
+        fig.add_annotation(x=_ob_time, y=(_ob_low + _ob_high) / 2,
+                           text=_ob_name, showarrow=False, font=dict(size=9))
+
+# Mark confirmed market-structure breaks on the chart.
+if len(_pivot_high_points) >= 1 and len(_pivot_low_points) >= 1 and len(_overlay_df) >= 3:
+    _last_close = float(_overlay_df["close"].iloc[-1])
+    _prev_close = float(_overlay_df["close"].iloc[-2])
+    _last_ph = _pivot_high_points[-1][1]
+    _last_pl = _pivot_low_points[-1][1]
+    _structure_label = None
+    _structure_y = None
+    if _last_close > _last_ph and _prev_close <= _last_ph:
+        _structure_label, _structure_y = "BOS ↑", _last_close
+    elif _last_close < _last_pl and _prev_close >= _last_pl:
+        _structure_label, _structure_y = "BOS ↓", _last_close
+    if _structure_label and not chart_df.empty:
+        fig.add_annotation(x=chart_df["datetime"].iloc[-1], y=_structure_y,
+                           text=_structure_label, showarrow=True,
+                           arrowhead=2, bgcolor="rgba(250,204,21,0.75)")
+
 if trade:
     fig.add_hline(y=trade["entry"], annotation_text="ENTRY", line_dash="solid")
     fig.add_hline(y=trade["sl"], annotation_text="STOP LOSS", line_dash="dash")
