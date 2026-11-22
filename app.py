@@ -2480,9 +2480,7 @@ else:
             "Mention that a signal is not a guarantee and encourage risk control. "
             "Current dashboard context: " + str(_current_market_context)
         )
-        _api_contents = [
-            {"role": "user", "parts": [{"text": _system_prompt}]}
-        ]
+        _api_contents = []
         for _item in st.session_state["gemini_chat_history"][-9:]:
             _api_role = "model" if _item["role"] == "assistant" else "user"
             _api_contents.append(
@@ -2499,6 +2497,7 @@ else:
                             "Content-Type": "application/json",
                         },
                         json={
+                            "systemInstruction": {"parts": [{"text": _system_prompt}]},
                             "contents": _api_contents,
                             "generationConfig": {
                                 "temperature": 0.35,
