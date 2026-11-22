@@ -2429,3 +2429,112 @@ try:
                 )
 except Exception as exc:
     st.warning(f"Could not validate latest candle timestamp: {str(exc)[:120]}")
+
+
+# ================= GEMINI AI LIVE CHAT =================
+st.divider()
+st.subheader("🤖 XAUUSD AI Live Chat")
+st.caption(
+    "বর্তমান ড্যাশবোর্ডের XAUUSD price, BUY/SELL score, 5M trend ও signal status "
+    "নিয়ে প্রশ্ন করুন। উত্তরটি AI-generated analysis, নিশ্চিত trading advice নয়।"
+)
+
+_gemini_key = st.secrets.get("GEMINI_API_KEY", "")
+if not _gemini_key:
+    st.info("AI Chat চালু করতে Streamlit Settings → Secrets-এ GEMINI_API_KEY যোগ করুন।")
+else:
+    _chat_history = st.session_state.setdefault("gemini_chat_history", [])
+    for _chat_item in _chat_history:
+        with st.chat_message(_chat_item["role"]):
+            st.markdown(_chat_item["content"])
+
+    _user_question = st.chat_input("যেমন: এখন WAIT কেন? BUY setup-এর জন্য কী confirmation দরকার?")
+    if _user_question:
+        st.session_state["gemini_chat_history"].append(
+            {"role": "user", "content": _user_question[:1500]}
+        )
+        with st.chat_message("user"):
+            st.markdown(_user_question[:1500])
+
+        _current_market_context = {
+            "symbol": "XAUUSD",
+            "last_price": round(float(df.iloc[-1]["close"]), 2) if "df" in locals() and not df.empty else None,
+            "final_signal": str(final_signal) if "final_signal" in locals() else "UNAVAILABLE",
+            "technical_score": signal_info.get("score") if "signal_info" in locals() else None,
+            "max_score": signal_info.get("max_score") if "signal_info" in locals() else None,
+            "buy_score": signal_info.get("buy_score") if "signal_info" in locals() else None,
+            "sell_score": signal_info.get("sell_score") if "signal_info" in locals() else None,
+            "completed_5m_trend": signal_info.get("htf_trend") if "signal_info" in locals() else "UNAVAILABLE",
+            "market_regime": str(regime) if "regime" in locals() else "UNAVAILABLE",
+            "data_freshness": live_data_status.get("status") if "live_data_status" in locals() else "UNAVAILABLE",
+            "bangladesh_time": pd.Timestamp.now(tz="Asia/Dhaka").strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        _system_prompt = (
+            "You are the XAUUSD analysis assistant inside a trading dashboard. "
+            "Answer in the same language as the user's question, especially Bangla when they use Bangla. "
+            "Use the supplied dashboard context as the only source for current market values. "
+            "Never invent live prices, indicators, signals, entries, stop losses or targets. "
+            "If data is unavailable or stale, say so clearly. Explain BUY/SELL/WAIT, 1M entry and completed 5M trend "
+            "in simple terms. Distinguish a confluence score from a probability of winning. "
+            "Do not promise accuracy or guaranteed profit. Do not claim to execute trades. "
+            "Mention that a signal is not a guarantee and encourage risk control. "
+            "Current dashboard context: " + str(_current_market_context)
+        )
+        _api_contents = [
+            {"role": "user", "parts": [{"text": _system_prompt}]}
+        ]
+        for _item in st.session_state["gemini_chat_history"][-9:]:
+            _api_role = "model" if _item["role"] == "assistant" else "user"
+            _api_contents.append(
+                {"role": _api_role, "parts": [{"text": _item["content"][:1500]}]}
+            )
+
+        with st.chat_message("assistant"):
+            with st.spinner("XAUUSD AI উত্তর তৈরি করছে..."):
+                try:
+                    _gemini_response = requests.post(
+                        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent",
+                        headers={
+                            "x-goog-api-key": _gemini_key,
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "contents": _api_contents,
+                            "generationConfig": {
+                                "temperature": 0.35,
+                                "maxOutputTokens": 700,
+                            },
+                        },
+                        timeout=35,
+                    )
+                    if _gemini_response.ok:
+                        _gemini_data = _gemini_response.json()
+                        _answer = (
+                            _gemini_data.get("candidates", [{}])[0]
+                            .get("content", {})
+                            .get("parts", [{}])[0]
+                            .get("text", "")
+                        )
+                        if not _answer:
+                            _answer = "AI থেকে খালি উত্তর এসেছে। আবার চেষ্টা করুন।"
+                        st.markdown(_answer)
+                        st.session_state["gemini_chat_history"].append(
+                            {"role": "assistant", "content": _answer}
+                        )
+                    else:
+                        st.error(
+                            f"Gemini API error ({_gemini_response.status_code}): "
+                            f"{_gemini_response.text[:500]}"
+                        )
+                        st.caption("API key, model access এবং AI Studio quota পরীক্ষা করুন।")
+                except requests.exceptions.Timeout:
+                    st.error("Gemini API উত্তর দিতে বেশি সময় নিচ্ছে। কিছুক্ষণ পর আবার চেষ্টা করুন।")
+                except requests.exceptions.RequestException as _chat_error:
+                    st.error(f"Network error: {str(_chat_error)[:250]}")
+                except (ValueError, KeyError, IndexError, TypeError) as _chat_error:
+                    st.error(f"AI response পড়তে সমস্যা হয়েছে: {str(_chat_error)[:250]}")
+
+    if st.button("🗑️ Chat history মুছুন", key="clear_gemini_chat"):
+        st.session_state["gemini_chat_history"] = []
+        st.rerun()
+
