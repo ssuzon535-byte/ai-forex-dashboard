@@ -936,7 +936,7 @@ def get_signal(row, df, min_score=3, experiment=None):
                 if h >= _zlo and l <= _zhi and c <= _zhi:
                     _bear_fvg_reaction = True
 
-        # Approximate demand/supply from recent swing extremes, with a proximity filter.
+        # Demand/supply zones from recent swing extremes.
         demand_candle = recent20.loc[recent20["low"].idxmin()]
         supply_candle = recent20.loc[recent20["high"].idxmax()]
         demand_low = float(demand_candle["low"])
@@ -946,7 +946,39 @@ def get_signal(row, df, min_score=3, experiment=None):
         buy_zone = l <= demand_high + 0.50 * atr and c >= demand_low and (c - demand_low) <= 1.25 * atr
         sell_zone = h >= supply_low - 0.50 * atr and c <= supply_high and (supply_high - c) <= 1.25 * atr
 
-        # Tick volume is optional. If provider volume is absent, score out of four.
+        # ICT dealing range: discount supports BUY ideas; premium supports SELL ideas.
+        dealing_high = float(recent20["high"].max())
+        dealing_low = float(recent20["low"].min())
+        equilibrium = (dealing_high + dealing_low) / 2.0
+        buy_discount = c <= equilibrium
+        sell_premium = c >= equilibrium
+
+        # SMC order block: last opposite-colour candle before displacement.
+        buy_order_block = False
+        sell_order_block = False
+        ob_scan = history.tail(30).reset_index(drop=True)
+        for ob_i in range(max(0, len(ob_scan) - 12), max(0, len(ob_scan) - 1)):
+            ob = ob_scan.iloc[ob_i]
+            after = ob_scan.iloc[ob_i + 1:min(ob_i + 4, len(ob_scan))]
+            if after.empty:
+                continue
+            ob_open, ob_close = float(ob["open"]), float(ob["close"])
+            if ob_close < ob_open:
+                ob_low, ob_high = float(ob["low"]), ob_open
+                displaced = float(after["close"].max()) > ob_high + 0.8 * atr
+                if displaced and l <= ob_high and h >= ob_low and c > ob_open:
+                    buy_order_block = True
+            elif ob_close > ob_open:
+                ob_low, ob_high = ob_open, float(ob["high"])
+                displaced = float(after["close"].min()) < ob_low - 0.8 * atr
+                if displaced and h >= ob_low and l <= ob_high and c < ob_open:
+                    sell_order_block = True
+
+        # ICT displacement: strong directional candle relative to ATR.
+        bullish_displacement = c > o and body >= 1.2 * atr and close_location >= 0.75
+        bearish_displacement = c < o and body >= 1.2 * atr and close_location <= 0.25
+
+        # Tick volume is optional; provider volume is not assumed available.
         volume_available = (
             "volume" in df.columns
             and history["volume"].notna().sum() >= 10
@@ -961,19 +993,25 @@ def get_signal(row, df, min_score=3, experiment=None):
 
         buy_price_action = bullish_rejection or buy_breakout or buy_retest
         sell_price_action = bearish_rejection or sell_breakout or sell_retest
-        buy_zone = buy_zone or _bull_fvg_reaction
-        sell_zone = sell_zone or _bear_fvg_reaction
         buy_checks = {
             "Price action (rejection / breakout / retest)": bool(buy_price_action),
             "Liquidity sweep": bool(buy_sweep),
             "Market structure (HH/HL or BOS/CHOCH)": bool(buy_structure),
             "Demand zone reaction": bool(buy_zone),
+            "FVG reaction": bool(_bull_fvg_reaction),
+            "ICT discount location": bool(buy_discount),
+            "SMC order block reaction": bool(buy_order_block),
+            "ICT bullish displacement": bool(bullish_displacement),
         }
         sell_checks = {
             "Price action (rejection / breakout / retest)": bool(sell_price_action),
             "Liquidity sweep": bool(sell_sweep),
             "Market structure (LH/LL or BOS/CHOCH)": bool(sell_structure),
             "Supply zone reaction": bool(sell_zone),
+            "FVG reaction": bool(_bear_fvg_reaction),
+            "ICT premium location": bool(sell_premium),
+            "SMC order block reaction": bool(sell_order_block),
+            "ICT bearish displacement": bool(bearish_displacement),
         }
         if volume_available:
             buy_checks["Volume spike + bullish candle"] = bool(volume_spike and c > o)
@@ -1022,6 +1060,14 @@ def get_signal(row, df, min_score=3, experiment=None):
         reasons = [name for name, passed in selected.items() if passed]
         reasons.append(f"5M trend: {htf_trend} ({htf_reason})")
         reasons.extend(locals().get("reasons_reversal", []))
+        if buy_order_block or sell_order_block:
+            reasons.append("SMC order block reaction detected")
+        if buy_discount or sell_premium:
+            reasons.append("ICT premium/discount location confirmed")
+        if bullish_displacement:
+            reasons.append("ICT bullish displacement candle")
+        if bearish_displacement:
+            reasons.append("ICT bearish displacement candle")
         # Record the exact price-action subtype for later win/loss attribution.
         # Use only the chosen direction so opposite-side patterns are not credited.
         if signal.endswith("BUY"):
@@ -1767,7 +1813,7 @@ else:
 left, right = st.columns(2)
 
 with left:
-    st.subheader("🧠 Price Action Decision Factors")
+    st.subheader("🧠 Gold Price Action + SMC + ICT Decision Engine")
 
     # Show the exact factors used by the current price-action signal engine.
     # The selected side is the generated signal, or the stronger side when WAIT.
@@ -1785,12 +1831,20 @@ with left:
         "Market structure (HH/HL or BOS/CHOCH)" if _selected_direction == "BUY"
             else "Market structure (LH/LL or BOS/CHOCH)",
         "Demand zone reaction" if _selected_direction == "BUY" else "Supply zone reaction",
+        "FVG reaction",
+        "ICT discount location" if _selected_direction == "BUY" else "ICT premium location",
+        "SMC order block reaction",
+        "ICT bullish displacement" if _selected_direction == "BUY" else "ICT bearish displacement",
     ]
     _factor_labels = [
         "Price Action",
         "Liquidity Sweep",
-        "Market Structure (HH/HL or LH/LL)",
-        "Demand Zone" if _selected_direction == "BUY" else "Supply Zone",
+        "Market Structure",
+        "Demand / Supply Zone",
+        "ICT Fair Value Gap",
+        "ICT Premium / Discount",
+        "SMC Order Block",
+        "ICT Displacement",
     ]
     _factor_rows = []
     for _label, _name in zip(_factor_labels, _factor_names):
