@@ -1714,7 +1714,10 @@ st.caption(
 
 _gemini_key = st.secrets.get("GEMINI_API_KEY", "")
 if not _gemini_key:
-    st.info("AI Chat চালু করতে Streamlit Settings → Secrets-এ GEMINI_API_KEY যোগ করুন।")
+    st.warning("Gemini API Key পাওয়া যায়নি। Streamlit Settings → Secrets-এ GEMINI_API_KEY যোগ করে Save করুন।")
+    _missing_key_question = st.chat_input("এখানে প্রশ্ন লিখুন...")
+    if _missing_key_question:
+        st.error("প্রশ্ন পাঠানো যাচ্ছে না, কারণ GEMINI_API_KEY সেট করা নেই। Secrets-এ key যোগ করে অ্যাপটি rerun করুন।")
 else:
     _chat_history = st.session_state.setdefault("gemini_chat_history", [])
     for _chat_item in _chat_history:
