@@ -787,15 +787,40 @@ def higher_timeframe_trend(df, signal_time, signal_interval_minutes=1):
         prior_ema20 = float(hourly["ema20"].iloc[-4])
         bullish_structure = rh > ph and rl > pl
         bearish_structure = rh < ph and rl < pl
-        bullish_ema = last_close > ema20 > ema50 and ema20 > prior_ema20
-        bearish_ema = last_close < ema20 < ema50 and ema20 < prior_ema20
+        bullish_ema_stack = last_close > ema20 > ema50
+        bearish_ema_stack = last_close < ema20 < ema50
+        prior_ema50 = float(hourly["ema50"].iloc[-4])
+        bullish_slope = ema20 > prior_ema20 and ema50 > prior_ema50
+        bearish_slope = ema20 < prior_ema20 and ema50 < prior_ema50
 
-        if bullish_structure and bullish_ema:
-            result.update({"trend":"BULLISH","reason":"Completed 5M HH/HL structure confirmed by close above rising EMA20/EMA50"})
-        elif bearish_structure and bearish_ema:
-            result.update({"trend":"BEARISH","reason":"Completed 5M LH/LL structure confirmed by close below falling EMA20/EMA50"})
+        # 5M is the primary direction filter. Use a 2-of-3 vote so a
+        # developing trend is not labelled RANGE just because structure
+        # has not yet printed a full HH/HL or LH/LL sequence.
+        bullish_votes = sum((bullish_structure, bullish_ema_stack, bullish_slope))
+        bearish_votes = sum((bearish_structure, bearish_ema_stack, bearish_slope))
+
+        if bullish_votes >= 2 and bullish_votes > bearish_votes:
+            result.update({
+                "trend": "BULLISH",
+                "reason": f"Completed 5M bullish bias ({bullish_votes}/3): "
+                          f"structure={'yes' if bullish_structure else 'no'}, "
+                          f"EMA stack={'yes' if bullish_ema_stack else 'no'}, "
+                          f"EMA slope={'yes' if bullish_slope else 'no'}",
+            })
+        elif bearish_votes >= 2 and bearish_votes > bullish_votes:
+            result.update({
+                "trend": "BEARISH",
+                "reason": f"Completed 5M bearish bias ({bearish_votes}/3): "
+                          f"structure={'yes' if bearish_structure else 'no'}, "
+                          f"EMA stack={'yes' if bearish_ema_stack else 'no'}, "
+                          f"EMA slope={'yes' if bearish_slope else 'no'}",
+            })
         else:
-            result.update({"trend":"RANGE / MIXED","reason":"Completed 5M structure and EMA20/EMA50 are not aligned"})
+            result.update({
+                "trend": "RANGE / MIXED",
+                "reason": f"5M direction unclear (bullish votes {bullish_votes}/3, "
+                          f"bearish votes {bearish_votes}/3); wait for alignment",
+            })
         return result
     except Exception as exc:
         result["reason"] = f"5M filter error: {str(exc)[:100]}"
@@ -1850,7 +1875,7 @@ with st.expander("🔎 কেন BUY/SELL আসছে না? (Signal diagnosti
     _d1.metric("BUY score", f"{signal_info.get('buy_score', 0)}/{signal_info.get('max_score', 8)}")
     _d2.metric("SELL score", f"{signal_info.get('sell_score', 0)}/{signal_info.get('max_score', 8)}")
     _d3.metric("Required score", str(min_score))
-    st.write("BUY/SELL পেতে কমপক্ষে ৪টি confirmation প্রয়োজন। 5M trend-এর বিপরীতে signal হলে sweep + CHOCH + FVG একসাথে লাগবে।")
+    st.write("5M হলো প্রধান direction filter এবং 1M হলো entry timeframe। 5M BULLISH হলে শুধু BUY setup, 5M BEARISH হলে শুধু SELL setup খোঁজা হয়। 5M RANGE / MIXED হলে পরিষ্কার reversal confirmation ছাড়া WAIT থাকবে। 1M-এ কমপক্ষে নির্ধারিত score এবং Price Action / Liquidity Sweep trigger-ও প্রয়োজন।")
     st.metric("Completed 5M Trend", signal_info.get("htf_trend", "UNAVAILABLE"))
     st.caption(f"Valid completed 5M candles: {signal_info.get('htf_bars', 0)}")
     if signal_info.get("reasons"):
